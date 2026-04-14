@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FileCache } from "../src/kosis/cache.js";
+import { filterRowsToSelectedClasses } from "../src/kosis/html-fallback.js";
 import { KosisService } from "../src/kosis/service.js";
 import type { JsonRecord } from "../src/kosis/types.js";
 import { guessDefaultDimensionValue } from "../src/kosis/utils.js";
@@ -357,4 +358,251 @@ test("guessDefaultDimensionValue prefers 대한민국 for country dimensions", (
   ]);
 
   assert.equal(selected, "1005");
+});
+
+class NeetSelectionClient extends FakeClient {
+  override async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
+    return [
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_NEET",
+        TBL_NM: "성별 및 연령별 교육, 취업, 직업 훈련에 참여하지 않는 청년 비율",
+        STAT_ID: "STAT_NEET",
+        STAT_NM: "UN",
+        MT_ATITLE: "국제기구별 통계 > UN",
+        STRT_PRD_DE: "2020",
+        END_PRD_DE: "2024",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_UNEMP",
+        TBL_NM: "청년(15~24세) 실업률",
+        STAT_ID: "STAT_UNEMP",
+        STAT_NM: "국제통계연감",
+        MT_ATITLE: "국제통계연감 > 노동",
+        STRT_PRD_DE: "2020",
+        END_PRD_DE: "2024",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_DISTRACTOR",
+        TBL_NM: "청년 실업률, 여성(15~24세 여성 경제활동인구 중 %)",
+        STAT_ID: "STAT_DISTRACTOR",
+        STAT_NM: "World Bank",
+        MT_ATITLE: "국제기구별 통계 > World Bank",
+        STRT_PRD_DE: "2020",
+        END_PRD_DE: "2024",
+      },
+    ];
+  }
+
+  override async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
+    if (params.type !== "ITM" && params.type !== "CMMT" && params.type !== "SOURCE" && params.type !== "TBL") {
+      return super.getMeta(params);
+    }
+
+    if (params.type === "TBL") {
+      return [
+        {
+          TBL_NM:
+            params.tblId === "DT_NEET"
+              ? "성별 및 연령별 교육, 취업, 직업 훈련에 참여하지 않는 청년 비율"
+              : params.tblId === "DT_UNEMP"
+                ? "청년(15~24세) 실업률"
+                : "청년 실업률, 여성(15~24세 여성 경제활동인구 중 %)",
+        },
+      ];
+    }
+
+    if (params.type === "ITM") {
+      if (params.tblId === "DT_NEET") {
+        return [
+          {
+            OBJ_ID: "ITEM",
+            OBJ_NM: "항목",
+            ITM_ID: "T1",
+            ITM_NM: "성별 연령별 교육 고용 훈련에 있지 않는 청소년 비율",
+            UNIT_NM: "%",
+          },
+          {
+            OBJ_ID: "A",
+            OBJ_NM: "국가별",
+            OBJ_ID_SN: "1",
+            ITM_ID: "1005",
+            ITM_NM: "대한민국",
+          },
+          {
+            OBJ_ID: "SEX",
+            OBJ_NM: "성별",
+            OBJ_ID_SN: "2",
+            ITM_ID: "TOT",
+            ITM_NM: "전체",
+          },
+        ];
+      }
+
+      return [
+        {
+          OBJ_ID: "ITEM",
+          OBJ_NM: "항목",
+          ITM_ID: params.tblId === "DT_UNEMP" ? "T10" : "T20",
+          ITM_NM:
+            params.tblId === "DT_UNEMP"
+              ? "15~24세 실업률"
+              : "청년 실업률 여성(15~24세 여성 경제활동인구 중 %)",
+          UNIT_NM: "%",
+        },
+        {
+          OBJ_ID: "A",
+          OBJ_NM: "국가별",
+          OBJ_ID_SN: "1",
+          ITM_ID: "1005",
+          ITM_NM: "대한민국",
+        },
+        {
+          OBJ_ID: "SEX",
+          OBJ_NM: "성별",
+          OBJ_ID_SN: "2",
+          ITM_ID: "TOT",
+          ITM_NM: "전체",
+        },
+      ];
+    }
+
+    if (params.type === "CMMT") {
+      if (params.tblId === "DT_NEET") {
+        return [{ CMMT_NM: "통계표", CMMT_DC: "15~24세 청년 중 교육, 고용, 훈련에 모두 참여하지 않는 NEET 인구의 비율이다." }];
+      }
+      return [{ CMMT_NM: "통계표", CMMT_DC: "청년 실업률이다." }];
+    }
+
+    if (params.type === "SOURCE") {
+      return [
+        {
+          JOSA_NM:
+            params.tblId === "DT_NEET"
+              ? "UN"
+              : params.tblId === "DT_UNEMP"
+                ? "국제통계연감"
+                : "World Bank",
+          STAT_ID:
+            params.tblId === "DT_NEET"
+              ? "STAT_NEET"
+              : params.tblId === "DT_UNEMP"
+                ? "STAT_UNEMP"
+                : "STAT_DISTRACTOR",
+        },
+      ];
+    }
+
+    return super.getMeta(params);
+  }
+
+  override async getExplanation(params: { statId?: string }): Promise<JsonRecord[]> {
+    if (params.statId === "STAT_NEET") {
+      return [{ statsNm: "NEET 관련 통계" }];
+    }
+    return super.getExplanation(params);
+  }
+
+  override async getStatisticsData(params: {
+    tblId: string;
+    itmId?: string;
+    objParams?: Record<string, string>;
+  }): Promise<JsonRecord[]> {
+    return [
+      {
+        TBL_NM: params.tblId,
+        C1_OBJ_NM: "국가별",
+        C1_NM: "대한민국",
+        ITM_NM: params.tblId === "DT_NEET" ? "NEET" : "실업률",
+        UNIT_NM: "%",
+        PRD_DE: "2024",
+        DT: params.tblId === "DT_NEET" ? "13.6" : "5.9",
+      },
+    ];
+  }
+}
+
+test("answerBundle prioritizes NEET tables when the question asks for NEET comparison", async () => {
+  const cache = new FileCache("/tmp/kosis-question-mcp-test-neet-selection", 10_000);
+  await cache.clearAll();
+  const service = new KosisService(
+    new NeetSelectionClient() as never,
+    cache,
+    5,
+  );
+
+  const answer = await service.answerBundle(
+    "NEET 비율과 청년 실업률을 같이 비교할 수 있는 표를 묶어줘",
+    { comparisonMode: "pairwise", limit: 3 },
+  );
+
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_NEET"));
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_UNEMP"));
+  assert.ok(!answer.selectedTables.some((table) => table.tblId === "DT_DISTRACTOR"));
+});
+
+test("filterRowsToSelectedClasses keeps only rows matching selected country labels", () => {
+  const rows = [
+    {
+      tableKey: "101:DT_2UNS0197",
+      "2) 국가(1)": "아시아",
+      "2) 국가(2)": "키프로스",
+      "성별": "전체",
+      "2023": "13.6",
+    },
+    {
+      tableKey: "101:DT_2UNS0197",
+      "2) 국가(1)": "",
+      "2) 국가(2)": "대한민국",
+      "성별": "전체",
+      "2023": "7.1",
+    },
+    {
+      tableKey: "101:DT_2UNS0197",
+      "2) 국가(1)": "",
+      "2) 국가(2)": "",
+      "성별": "남자",
+      "2023": "6.5",
+    },
+  ];
+  const statInfo = {
+    classInfoList: [
+      {
+        classId: "2UNS",
+        classNm: "국가",
+        sn: "1",
+        itmList: [
+          { itmId: "1055", scrKor: "키프로스" },
+          { itmId: "1005", scrKor: "대한민국" },
+        ],
+      },
+      {
+        classId: "SBB",
+        classNm: "성별",
+        sn: "2",
+        itmList: [
+          { itmId: "0", scrKor: "전체" },
+          { itmId: "1", scrKor: "남자" },
+        ],
+      },
+    ],
+  };
+
+  const filtered = filterRowsToSelectedClasses(
+    rows,
+    ["tableKey", "2) 국가(1)", "2) 국가(2)", "성별", "2023"],
+    statInfo,
+    [
+      { classId: "2UNS", values: ["1005"], sn: "1" },
+      { classId: "SBB", values: ["0"], sn: "2" },
+    ],
+  );
+
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0]?.["2) 국가(2)"], "대한민국");
 });

@@ -35,6 +35,12 @@ interface StatHtmlInfo {
   colClsAt?: string;
 }
 
+interface SelectedClass {
+  classId: string;
+  values: string[];
+  sn: string;
+}
+
 function decodeHtml(value: string): string {
   return value
     .replace(/&nbsp;/g, " ")
@@ -193,7 +199,7 @@ function resolveSelectedItems(
 function resolveSelectedClasses(
   statInfo: StatHtmlInfo,
   options?: PreviewRequestOptions,
-): Array<{ classId: string; values: string[]; sn: string }> {
+): SelectedClass[] {
   return (statInfo.classInfoList ?? []).map((classInfo) => {
     const explicitSelection =
       options?.dimensionSelections?.[classInfo.classId] ??
@@ -247,6 +253,28 @@ function resolveSelectedClasses(
       sn: classInfo.sn,
     };
   });
+}
+
+function normalizeForMatch(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "");
+}
+
+function buildSelectedLabelMap(
+  statInfo: StatHtmlInfo,
+  selectedClasses: SelectedClass[],
+): Map<string, string[]> {
+  return new Map(
+    selectedClasses.map((selectedClass) => {
+      const classInfo = (statInfo.classInfoList ?? []).find(
+        (entry) => entry.classId === selectedClass.classId,
+      );
+      const labels = selectedClass.values.map((valueId) => {
+        const match = (classInfo?.itmList ?? []).find((item) => item.itmId === valueId);
+        return match?.scrKor?.trim() ?? valueId;
+      });
+      return [selectedClass.classId, labels];
+    }),
+  );
 }
 
 function buildFieldList(
@@ -341,7 +369,80 @@ function buildOrderStr(statInfo: StatHtmlInfo): string {
   return parts.join(",");
 }
 
-function parseTableHtml(tableHtml: string, tableKey: string): DataPreviewRow[] {
+export function filterRowsToSelectedClasses(
+  rows: DataPreviewRow[],
+  headerCells: string[],
+  statInfo: StatHtmlInfo,
+  selectedClasses: SelectedClass[],
+): DataPreviewRow[] {
+  if (rows.length === 0 || selectedClasses.length === 0) {
+    return rows;
+  }
+
+  const selectedLabelMap = buildSelectedLabelMap(statInfo, selectedClasses);
+  const lastSeenByHeader = new Map<string, string>();
+
+  const filteredRows = rows.filter((row) => {
+    const effectiveRow = new Map<string, string>();
+
+    for (const header of headerCells) {
+      if (header === "tableKey") {
+        continue;
+      }
+      const rawValue = row[header];
+      const value = typeof rawValue === "string" ? rawValue.trim() : "";
+      if (value) {
+        lastSeenByHeader.set(header, value);
+        effectiveRow.set(header, value);
+        continue;
+      }
+
+      const previous = lastSeenByHeader.get(header);
+      if (previous) {
+        effectiveRow.set(header, previous);
+      }
+    }
+
+    return selectedClasses.every((selectedClass) => {
+      const classInfo = (statInfo.classInfoList ?? []).find(
+        (entry) => entry.classId === selectedClass.classId,
+      );
+      if (!classInfo) {
+        return true;
+      }
+
+      const matchingHeaders = headerCells.filter((header) =>
+        normalizeForMatch(header).includes(normalizeForMatch(classInfo.classNm)),
+      );
+      if (matchingHeaders.length === 0) {
+        return true;
+      }
+
+      const selectedLabels = selectedLabelMap.get(selectedClass.classId) ?? [];
+      return matchingHeaders.some((header) => {
+        const effectiveValue = effectiveRow.get(header);
+        if (!effectiveValue) {
+          return false;
+        }
+        const normalizedValue = normalizeForMatch(effectiveValue);
+        return selectedLabels.some(
+          (label) =>
+            normalizedValue === normalizeForMatch(label) ||
+            normalizedValue.includes(normalizeForMatch(label)),
+        );
+      });
+    });
+  });
+
+  return filteredRows.length > 0 ? filteredRows : rows;
+}
+
+function parseTableHtml(
+  tableHtml: string,
+  tableKey: string,
+  statInfo: StatHtmlInfo,
+  selectedClasses: SelectedClass[],
+): DataPreviewRow[] {
   const rows = [...tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map(
     (match) => match[1],
   );
@@ -353,8 +454,8 @@ function parseTableHtml(tableHtml: string, tableKey: string): DataPreviewRow[] {
     (match) => stripHtml(match[1]),
   );
 
-  const bodyRows = rows.slice(1, 6);
-  return bodyRows
+  const parsedRows = rows
+    .slice(1)
     .map((rowHtml) => [...rowHtml.matchAll(/<(td|th)[^>]*>([\s\S]*?)<\/(td|th)>/g)])
     .filter((cells) => cells.length > 0)
     .map((cells) => {
@@ -371,6 +472,13 @@ function parseTableHtml(tableHtml: string, tableKey: string): DataPreviewRow[] {
         .filter(([key]) => key !== "tableKey")
         .some(([, value]) => typeof value === "string" && /\d/.test(value)),
     );
+
+  return filterRowsToSelectedClasses(
+    parsedRows,
+    ["tableKey", ...headerCells],
+    statInfo,
+    selectedClasses,
+  ).slice(0, 20);
 }
 
 class CookieSession {
@@ -586,5 +694,5 @@ export async function fetchHtmlPreviewFallback(
     return null;
   }
 
-  return parseTableHtml(tableHtml, tableKey);
+  return parseTableHtml(tableHtml, tableKey, statInfo, selectedClasses);
 }

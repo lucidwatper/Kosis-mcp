@@ -440,14 +440,29 @@ function computeQuestionBonus(
   const title = bundle.table.title;
   const optionNames = bundle.previewGuide.itemOptions.map((option) => option.name);
   const dimensionNames = bundle.previewGuide.dimensions.map((dimension) => dimension.name);
+  const contextText = [
+    title,
+    ...optionNames,
+    ...bundle.meta.comments.map((comment) => readString(comment, "CMMT_DC") ?? ""),
+    readString(bundle.explanation ?? {}, "statsNm") ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasKeyword = (needle: string) =>
+    keywords.some((keyword) => keyword.includes(needle));
+  const hasNeetSignal =
+    contextText.includes("neet") ||
+    ((contextText.includes("교육") || contextText.includes("고용")) &&
+      contextText.includes("훈련") &&
+      (contextText.includes("참여하지") || contextText.includes("있지 않는")));
 
-  if (keywords.includes("실업")) {
+  if (hasKeyword("실업")) {
     if (title.includes("실업") || optionNames.some((name) => name.includes("실업"))) {
       bonus += 18;
     }
   }
 
-  if (keywords.includes("고용") || keywords.includes("취업")) {
+  if (hasKeyword("고용") || hasKeyword("취업")) {
     if (
       title.includes("고용") ||
       title.includes("취업") ||
@@ -459,7 +474,7 @@ function computeQuestionBonus(
     }
   }
 
-  if (keywords.includes("청년")) {
+  if (hasKeyword("청년")) {
     if (
       title.includes("청년") ||
       dimensionNames.some((name) => name.includes("연령")) ||
@@ -471,7 +486,15 @@ function computeQuestionBonus(
     }
   }
 
-  if (title.includes("비경제활동") && !keywords.includes("비경제활동")) {
+  if (hasKeyword("neet")) {
+    if (hasNeetSignal) {
+      bonus += 60;
+    } else if (title.includes("실업")) {
+      bonus -= 18;
+    }
+  }
+
+  if (title.includes("비경제활동") && !hasKeyword("비경제활동")) {
     bonus -= 6;
   }
 
