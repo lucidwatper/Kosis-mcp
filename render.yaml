@@ -23,5 +23,3 @@ services:
         value: production
       - key: NPM_CONFIG_PRODUCTION
         value: "false"
-      - key: MCP_SERVER_TOKEN
-        sync: false

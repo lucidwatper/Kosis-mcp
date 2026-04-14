@@ -183,6 +183,20 @@ function extractBearerToken(authHeader?: string): string | undefined {
   return match?.[1];
 }
 
+function extractUserApiKey(req: any): string | undefined {
+  const headerValue = req.header("x-kosis-api-key");
+  if (headerValue) {
+    return headerValue;
+  }
+
+  const queryValue = req.query?.oc;
+  if (typeof queryValue === "string" && queryValue.trim()) {
+    return queryValue.trim();
+  }
+
+  return undefined;
+}
+
 async function startStdioServer(
   config: ReturnType<typeof loadConfig>,
 ): Promise<void> {
@@ -202,12 +216,6 @@ async function startStdioServer(
 async function startHttpServer(
   config: ReturnType<typeof loadConfig>,
 ): Promise<void> {
-  if (!config.serverToken) {
-    throw new Error(
-      "MCP_SERVER_TOKEN is required in HTTP mode to protect the remote MCP server.",
-    );
-  }
-
   const cache = new FileCache(config.cacheDir, config.cacheTtlMs);
   if (config.clearCacheOnStart) {
     await cache.clearAll();
@@ -220,26 +228,28 @@ async function startHttpServer(
   });
 
   app.post("/mcp", async (req: any, res: any) => {
-    const bearerToken = extractBearerToken(req.header("authorization"));
-    if (bearerToken !== config.serverToken) {
-      res.status(401).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32001,
-          message: "Unauthorized",
-        },
-        id: null,
-      });
-      return;
+    if (config.serverToken) {
+      const bearerToken = extractBearerToken(req.header("authorization"));
+      if (bearerToken !== config.serverToken) {
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32001,
+            message: "Unauthorized",
+          },
+          id: null,
+        });
+        return;
+      }
     }
 
-    const userApiKey = req.header("x-kosis-api-key");
+    const userApiKey = extractUserApiKey(req);
     if (!userApiKey) {
       res.status(400).json({
         jsonrpc: "2.0",
         error: {
           code: -32602,
-          message: "Missing X-Kosis-Api-Key header",
+          message: "Missing KOSIS API key. Provide X-Kosis-Api-Key header or ?oc= query parameter.",
         },
         id: null,
       });
