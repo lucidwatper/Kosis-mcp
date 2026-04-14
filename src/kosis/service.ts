@@ -38,6 +38,8 @@ interface PreviewPlan {
   guide: PreviewGuide;
 }
 
+const BUNDLE_CACHE_VERSION = "v2";
+
 function mapPeriodCode(raw?: string): string {
   if (!raw) {
     return "Y";
@@ -664,7 +666,13 @@ export class KosisService {
     prdSe?: string,
     previewOptions?: PreviewRequestOptions,
   ): Promise<KosisTableBundle> {
-    const cacheKey = JSON.stringify({ orgId, tblId, prdSe, previewOptions });
+    const cacheKey = JSON.stringify({
+      version: BUNDLE_CACHE_VERSION,
+      orgId,
+      tblId,
+      prdSe,
+      previewOptions,
+    });
     const cached = await this.cache.get<KosisTableBundle>("bundle", cacheKey);
     if (cached) {
       return cached;

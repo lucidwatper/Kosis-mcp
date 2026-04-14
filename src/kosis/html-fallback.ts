@@ -220,6 +220,18 @@ function resolveSelectedClasses(
         ? [explicitSelection]
         : [];
     const lowered = explicitValues.map((value) => value.toLowerCase().trim());
+    const metaMatches = (meta?.items ?? [])
+      .filter(
+        (item) =>
+          item.OBJ_ID === classInfo.classId &&
+          typeof item.ITM_ID === "string" &&
+          lowered.some(
+            (candidate) =>
+              String(item.ITM_ID).toLowerCase() === candidate ||
+              (typeof item.ITM_NM === "string" && item.ITM_NM.toLowerCase().trim() === candidate),
+          ),
+      )
+      .map((item) => String(item.ITM_ID));
 
     const mappedExplicit = (classInfo.itmList ?? [])
       .filter((item) =>
@@ -230,17 +242,18 @@ function resolveSelectedClasses(
         ),
       )
       .map((item) => item.itmId);
+    const resolvedExplicit = [...new Set([...mappedExplicit, ...metaMatches])];
 
-    if (mappedExplicit.length > 0) {
+    if (resolvedExplicit.length > 0) {
       const hierarchyValues = expandHierarchyValues(
         classInfo.classId,
-        mappedExplicit,
+        resolvedExplicit,
         meta,
       );
       return {
         classId: classInfo.classId,
         values: hierarchyValues,
-        filterValues: mappedExplicit,
+        filterValues: resolvedExplicit,
         sn: classInfo.sn,
       };
     }
@@ -422,11 +435,28 @@ function buildOrderStr(statInfo: StatHtmlInfo): string {
   return parts.join(",");
 }
 
+function buildBroadSelectedClasses(statInfo: StatHtmlInfo): SelectedClass[] {
+  return (statInfo.classInfoList ?? []).map((classInfo) => {
+    const values =
+      classInfo.defaultItmMapList?.map((item) => item.ITM_ID).filter(Boolean) ??
+      classInfo.defaultItmList?.map((entry) => entry.split("#").at(-1) ?? "").filter(Boolean) ??
+      [];
+
+    return {
+      classId: classInfo.classId,
+      values,
+      filterValues: values,
+      sn: classInfo.sn,
+    };
+  });
+}
+
 export function filterRowsToSelectedClasses(
   rows: DataPreviewRow[],
   headerCells: string[],
   statInfo: StatHtmlInfo,
   selectedClasses: SelectedClass[],
+  fallbackToOriginal = true,
 ): DataPreviewRow[] {
   if (rows.length === 0 || selectedClasses.length === 0) {
     return rows;
@@ -487,7 +517,7 @@ export function filterRowsToSelectedClasses(
     });
   });
 
-  return filteredRows.length > 0 ? filteredRows : rows;
+  return filteredRows.length > 0 ? filteredRows : fallbackToOriginal ? rows : [];
 }
 
 function parseTableHtml(
@@ -495,6 +525,7 @@ function parseTableHtml(
   tableKey: string,
   statInfo: StatHtmlInfo,
   selectedClasses: SelectedClass[],
+  fallbackToOriginal = true,
 ): DataPreviewRow[] {
   const rows = [...tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map(
     (match) => match[1],
@@ -531,6 +562,7 @@ function parseTableHtml(
     ["tableKey", ...headerCells],
     statInfo,
     selectedClasses,
+    fallbackToOriginal,
   ).slice(0, 20);
 }
 
@@ -688,71 +720,101 @@ export async function fetchHtmlPreviewFallback(
   const selectedItems = resolveSelectedItems(statInfo, options);
   const periodCode = resolveDefaultPeriodCode(statInfo);
   const periods = resolvePeriodList(statInfo, periodCode, options);
-  const itemMultiply =
-    Math.max(selectedItems.length, 1) *
-    Math.max(
-      selectedClasses.reduce((sum, current) => sum + current.values.length, 0),
-      1,
+
+  const requestPreview = async (
+    requestClasses: SelectedClass[],
+    filterClasses: SelectedClass[],
+  ): Promise<DataPreviewRow[] | null> => {
+    const requestItemMultiply =
+      Math.max(selectedItems.length, 1) *
+      Math.max(
+        requestClasses.reduce((sum, current) => sum + current.values.length, 0),
+        1,
+      );
+    const requestMixItemCount = requestItemMultiply * Math.max(periods.length, 1);
+
+    params.set("fieldList", buildFieldList(selectedItems, requestClasses, periodCode, periods));
+    params.set("colAxis", (statInfo.pivotInfo?.colList ?? []).join(","));
+    params.set("rowAxis", (statInfo.pivotInfo?.rowList ?? []).join(","));
+    params.set("isFirst", "N");
+    params.set("logSeq", String(Date.now()).slice(-9));
+    params.set("viewKind", "1");
+    params.set("viewSubKind", "");
+    params.set("doAnal", "N");
+    params.set("defaulPeriodArr", buildDefaultPeriodArr(periodCode, periods));
+    params.set("defaultClassArr", buildDefaultClassArr(requestClasses));
+    params.set("defaultItmArr", buildDefaultItemArr(selectedItems));
+    params.set("classAllArr", buildClassAllArr(statInfo));
+    params.set("classSet", buildClassSet(statInfo));
+    params.set("selectAllFlag", "N");
+    params.set("funcPrdSe", periodCode);
+    params.set("itemMultiply", String(requestItemMultiply));
+    params.set("cmmtChk", "Y");
+    params.set("labelOriginData", "원자료 함께 보기");
+    params.set("orderStr", buildOrderStr(statInfo));
+    params.set("startNum", "1");
+    params.set("endNum", String(requestMixItemCount));
+    params.set("lastChk", "N");
+    params.set("colClsAt", statInfo.colClsAt ?? "N");
+    params.set("analyzable", String(statInfo.analyzable ?? true));
+    params.set("tableType", "default");
+    params.set("dataOpt2", params.get("dataOpt") ?? "ko");
+    params.set("reqCellCnt", "0");
+    params.set("prdSort", "asc");
+    params.set("prdseSelect", "N");
+    params.set("downGridFileType", "xlsx");
+    params.set("downGridCellMerge", "Y");
+    params.set("downGridMeta", "Y");
+    params.set("expDash", "Y");
+
+    const htmlResponse = await session.requestText("/statHtml/html.do", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        Referer: `${config.baseUrl}/statHtml/statHtml.do?orgId=${encodeURIComponent(orgId)}&tblId=${encodeURIComponent(tblId)}`,
+      },
+      body: params,
+    });
+
+    const parsed = JSON.parse(htmlResponse) as {
+      errCode?: number;
+      errMsg?: string;
+      result?: string[];
+    };
+
+    if (parsed.errCode) {
+      return null;
+    }
+
+    const tableHtml = parsed.result?.[0];
+    if (!tableHtml) {
+      return null;
+    }
+
+    const rows = parseTableHtml(
+      tableHtml,
+      tableKey,
+      statInfo,
+      filterClasses,
+      false,
     );
-  const mixItemCount = itemMultiply * Math.max(periods.length, 1);
-
-  params.set("fieldList", buildFieldList(selectedItems, selectedClasses, periodCode, periods));
-  params.set("colAxis", (statInfo.pivotInfo?.colList ?? []).join(","));
-  params.set("rowAxis", (statInfo.pivotInfo?.rowList ?? []).join(","));
-  params.set("isFirst", "N");
-  params.set("logSeq", String(Date.now()).slice(-9));
-  params.set("viewKind", "1");
-  params.set("viewSubKind", "");
-  params.set("doAnal", "N");
-  params.set("defaulPeriodArr", buildDefaultPeriodArr(periodCode, periods));
-  params.set("defaultClassArr", buildDefaultClassArr(selectedClasses));
-  params.set("defaultItmArr", buildDefaultItemArr(selectedItems));
-  params.set("classAllArr", buildClassAllArr(statInfo));
-  params.set("classSet", buildClassSet(statInfo));
-  params.set("selectAllFlag", "N");
-  params.set("funcPrdSe", periodCode);
-  params.set("itemMultiply", String(itemMultiply));
-  params.set("cmmtChk", "Y");
-  params.set("labelOriginData", "원자료 함께 보기");
-  params.set("orderStr", buildOrderStr(statInfo));
-  params.set("startNum", "1");
-  params.set("endNum", String(mixItemCount));
-  params.set("lastChk", "N");
-  params.set("colClsAt", statInfo.colClsAt ?? "N");
-  params.set("analyzable", String(statInfo.analyzable ?? true));
-  params.set("tableType", "default");
-  params.set("dataOpt2", params.get("dataOpt") ?? "ko");
-  params.set("reqCellCnt", "0");
-  params.set("prdSort", "asc");
-  params.set("prdseSelect", "N");
-  params.set("downGridFileType", "xlsx");
-  params.set("downGridCellMerge", "Y");
-  params.set("downGridMeta", "Y");
-  params.set("expDash", "Y");
-
-  const htmlResponse = await session.requestText("/statHtml/html.do", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Referer: `${config.baseUrl}/statHtml/statHtml.do?orgId=${encodeURIComponent(orgId)}&tblId=${encodeURIComponent(tblId)}`,
-    },
-    body: params,
-  });
-
-  const parsed = JSON.parse(htmlResponse) as {
-    errCode?: number;
-    errMsg?: string;
-    result?: string[];
+    return rows.length > 0 ? rows : null;
   };
 
-  if (parsed.errCode) {
-    throw new KosisApiError(parsed.errMsg ?? "KOSIS HTML fallback failed");
+  const targetedRows = await requestPreview(selectedClasses, selectedClasses);
+  if (targetedRows && targetedRows.length > 0) {
+    return targetedRows;
   }
 
-  const tableHtml = parsed.result?.[0];
-  if (!tableHtml) {
-    return null;
+  if (selectedClasses.length > 0) {
+    const broadRows = await requestPreview(
+      buildBroadSelectedClasses(statInfo),
+      selectedClasses,
+    );
+    if (broadRows && broadRows.length > 0) {
+      return broadRows;
+    }
   }
 
-  return parseTableHtml(tableHtml, tableKey, statInfo, selectedClasses);
+  return null;
 }
