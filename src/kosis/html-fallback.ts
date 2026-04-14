@@ -2,6 +2,7 @@ import type { KosisConfig } from "../config.js";
 import { KosisApiError } from "./errors.js";
 import type {
   DataPreviewRow,
+  KosisMetaBundle,
   PreviewRequestOptions,
 } from "./types.js";
 import { guessDefaultDimensionValue } from "./utils.js";
@@ -39,6 +40,10 @@ interface SelectedClass {
   classId: string;
   values: string[];
   sn: string;
+}
+
+interface ResolvedSelectionMap {
+  [classId: string]: string | undefined;
 }
 
 function decodeHtml(value: string): string {
@@ -199,9 +204,12 @@ function resolveSelectedItems(
 function resolveSelectedClasses(
   statInfo: StatHtmlInfo,
   options?: PreviewRequestOptions,
+  meta?: KosisMetaBundle,
+  resolvedSelections?: ResolvedSelectionMap,
 ): SelectedClass[] {
   return (statInfo.classInfoList ?? []).map((classInfo) => {
     const explicitSelection =
+      resolvedSelections?.[classInfo.classId] ??
       options?.dimensionSelections?.[classInfo.classId] ??
       options?.dimensionSelections?.[classInfo.classNm];
 
@@ -223,7 +231,12 @@ function resolveSelectedClasses(
       .map((item) => item.itmId);
 
     if (mappedExplicit.length > 0) {
-      return { classId: classInfo.classId, values: mappedExplicit, sn: classInfo.sn };
+      const hierarchyValues = expandHierarchyValues(
+        classInfo.classId,
+        mappedExplicit,
+        meta,
+      );
+      return { classId: classInfo.classId, values: hierarchyValues, sn: classInfo.sn };
     }
 
     const inferredDefault = guessDefaultDimensionValue(
@@ -235,9 +248,14 @@ function resolveSelectedClasses(
       })),
     );
     if (inferredDefault) {
+      const hierarchyValues = expandHierarchyValues(
+        classInfo.classId,
+        [inferredDefault],
+        meta,
+      );
       return {
         classId: classInfo.classId,
-        values: [inferredDefault],
+        values: hierarchyValues,
         sn: classInfo.sn,
       };
     }
@@ -253,6 +271,41 @@ function resolveSelectedClasses(
       sn: classInfo.sn,
     };
   });
+}
+
+function expandHierarchyValues(
+  classId: string,
+  selectedIds: string[],
+  meta?: KosisMetaBundle,
+): string[] {
+  if (!meta || selectedIds.length === 0) {
+    return selectedIds;
+  }
+
+  const itemById = new Map(
+    meta.items
+      .filter((item) => item.OBJ_ID === classId && typeof item.ITM_ID === "string")
+      .map((item) => [
+        String(item.ITM_ID),
+        typeof item.UP_ITM_ID === "string" ? String(item.UP_ITM_ID) : undefined,
+      ]),
+  );
+
+  const expanded = selectedIds.flatMap((selectedId) => {
+    const chain: string[] = [];
+    let current: string | undefined = selectedId;
+    const seen = new Set<string>();
+
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      chain.unshift(current);
+      current = itemById.get(current);
+    }
+
+    return chain.length > 0 ? chain : [selectedId];
+  });
+
+  return [...new Set(expanded)];
 }
 
 function normalizeForMatch(value: string): string {
@@ -562,6 +615,8 @@ export async function fetchHtmlPreviewFallback(
   tblId: string,
   tableKey: string,
   options?: PreviewRequestOptions,
+  meta?: KosisMetaBundle,
+  resolvedSelections?: ResolvedSelectionMap,
 ): Promise<DataPreviewRow[] | null> {
   const session = new CookieSession(config);
   const outerHtml = await session.requestText(
@@ -624,7 +679,12 @@ export async function fetchHtmlPreviewFallback(
   const statInfo = extractStatInfo(contentHtml);
   const params = extractFormInputs(contentHtml);
 
-  const selectedClasses = resolveSelectedClasses(statInfo, options);
+  const selectedClasses = resolveSelectedClasses(
+    statInfo,
+    options,
+    meta,
+    resolvedSelections,
+  );
   const selectedItems = resolveSelectedItems(statInfo, options);
   const periodCode = resolveDefaultPeriodCode(statInfo);
   const periods = resolvePeriodList(statInfo, periodCode, options);

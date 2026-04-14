@@ -749,15 +749,21 @@ export class KosisService {
 
     let dataPreview: DataPreviewRow[] = [];
     const estimatedCells = estimateCellCount(meta, 5);
+    const previewPlan = derivePreviewPlanWithSelections(
+      meta,
+      effectivePrdSe,
+      previewOptions,
+    );
+    const resolvedSelections = Object.fromEntries(
+      previewPlan.guide.dimensions.map((dimension, index) => [
+        dimension.objId,
+        previewPlan.attempts[0]?.[`objL${index + 1}`],
+      ]),
+    );
 
     if (estimatedCells > 40_000) {
       warnings.push("예상 조회 셀 수가 많아 preview 조회를 생략했습니다.");
     } else {
-      const previewPlan = derivePreviewPlanWithSelections(
-        meta,
-        effectivePrdSe,
-        previewOptions,
-      );
       let lastPreviewError: string | undefined;
 
       for (const objParams of previewPlan.attempts) {
@@ -794,6 +800,8 @@ export class KosisService {
             tblId,
             tableKey(orgId, tblId),
             previewOptions,
+            meta,
+            resolvedSelections,
           );
 
           if (fallbackPreview && fallbackPreview.length > 0) {
@@ -824,11 +832,11 @@ export class KosisService {
         periods: normalizePeriods(meta, dataPreview),
         lastUpdated: readString(meta.updatedAt[0] ?? {}, "SEND_DE"),
       },
-      previewGuide: derivePreviewPlanWithSelections(meta, effectivePrdSe, previewOptions).guide,
+      previewGuide: previewPlan.guide,
       previewRequest: {
-        itemId: derivePreviewPlanWithSelections(meta, effectivePrdSe, previewOptions).itemId,
-        prdSe: derivePreviewPlanWithSelections(meta, effectivePrdSe, previewOptions).prdSe,
-        attempts: derivePreviewPlanWithSelections(meta, effectivePrdSe, previewOptions).attempts,
+        itemId: previewPlan.itemId,
+        prdSe: previewPlan.prdSe,
+        attempts: previewPlan.attempts,
       },
       comparisonReadiness: detectReadiness(dataPreview, warnings),
     };
