@@ -4,6 +4,7 @@ import type {
   DataPreviewRow,
   PreviewRequestOptions,
 } from "./types.js";
+import { guessDefaultDimensionValue } from "./utils.js";
 
 interface CookieEntry {
   name: string;
@@ -217,6 +218,22 @@ function resolveSelectedClasses(
 
     if (mappedExplicit.length > 0) {
       return { classId: classInfo.classId, values: mappedExplicit, sn: classInfo.sn };
+    }
+
+    const inferredDefault = guessDefaultDimensionValue(
+      classInfo.classNm,
+      classInfo.classId,
+      (classInfo.itmList ?? []).map((item) => ({
+        id: item.itmId,
+        name: item.scrKor,
+      })),
+    );
+    if (inferredDefault) {
+      return {
+        classId: classInfo.classId,
+        values: [inferredDefault],
+        sn: classInfo.sn,
+      };
     }
 
     const fallback =

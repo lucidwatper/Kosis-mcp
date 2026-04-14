@@ -23,6 +23,7 @@ import type {
   TableIdentity,
 } from "./types.js";
 import {
+  guessDefaultDimensionValue,
   readString,
   tableKey,
   textFromRecord,
@@ -175,7 +176,13 @@ function derivePreviewPlanWithSelections(
     const selection =
       options?.dimensionSelections?.[dimension.objId] ??
       options?.dimensionSelections?.[dimension.name];
-    const selectedId = resolveSelectionValue(dimension, selection);
+    const selectedId =
+      resolveSelectionValue(dimension, selection) ??
+      guessDefaultDimensionValue(
+        dimension.name,
+        dimension.objId,
+        dimension.values,
+      );
 
     explicitAttempt[`objL${index + 1}`] = selectedId ?? "all";
     allAttempt[`objL${index + 1}`] = "all";

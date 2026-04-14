@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { FileCache } from "../src/kosis/cache.js";
 import { KosisService } from "../src/kosis/service.js";
 import type { JsonRecord } from "../src/kosis/types.js";
+import { guessDefaultDimensionValue } from "../src/kosis/utils.js";
 
 class FakeClient {
   async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
@@ -253,4 +254,107 @@ test("answerBundle carries inferred preview selections into selected tables", as
   assert.ok(
     answer.selectedTables.some((table) => table.previewRequest.itemId === "UNE"),
   );
+});
+
+class CountryDefaultClient extends FakeClient {
+  override async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
+    if (params.type !== "ITM") {
+      return super.getMeta(params);
+    }
+
+    return [
+      {
+        OBJ_ID: "ITEM",
+        OBJ_NM: "항목",
+        ITM_ID: "T1",
+        ITM_NM: "청년 실업률",
+        UNIT_NM: "%",
+      },
+      {
+        OBJ_ID: "A",
+        OBJ_NM: "국가별",
+        OBJ_ID_SN: "1",
+        ITM_ID: "1",
+        ITM_NM: "아시아",
+      },
+      {
+        OBJ_ID: "A",
+        OBJ_NM: "국가별",
+        OBJ_ID_SN: "1",
+        ITM_ID: "1005",
+        ITM_NM: "대한민국",
+      },
+      {
+        OBJ_ID: "A",
+        OBJ_NM: "국가별",
+        OBJ_ID_SN: "1",
+        ITM_ID: "1010",
+        ITM_NM: "아프가니스탄",
+      },
+      {
+        OBJ_ID: "D",
+        OBJ_NM: "성별",
+        OBJ_ID_SN: "2",
+        ITM_ID: "00",
+        ITM_NM: "전체",
+      },
+    ];
+  }
+
+  override async getStatisticsData(params: {
+    tblId: string;
+    itmId?: string;
+    objParams?: Record<string, string>;
+  }): Promise<JsonRecord[]> {
+    if (params.objParams?.objL1 === "1005") {
+      return [
+        {
+          TBL_NM: "청년 실업률",
+          C1_OBJ_NM: "국가별",
+          C1_NM: "대한민국",
+          ITM_NM: "청년 실업률",
+          UNIT_NM: "%",
+          PRD_DE: "2024",
+          DT: "5.9",
+        },
+      ];
+    }
+
+    return [
+      {
+        TBL_NM: "청년 실업률",
+        C1_OBJ_NM: "국가별",
+        C1_NM: "아시아",
+        ITM_NM: "청년 실업률",
+        UNIT_NM: "%",
+        PRD_DE: "2024",
+        DT: "11.0",
+      },
+    ];
+  }
+}
+
+test("getTableBundle defaults country dimensions to 대한민국 when available", async () => {
+  const cache = new FileCache("/tmp/kosis-question-mcp-test-country-default", 10_000);
+  await cache.clearAll();
+  const service = new KosisService(
+    new CountryDefaultClient() as never,
+    cache,
+    5,
+  );
+
+  const bundle = await service.getTableBundle("101", "DT_TEST_COUNTRY", "Y");
+
+  assert.equal(bundle.dataPreview[0]?.C1_NM, "대한민국");
+  assert.equal(bundle.previewRequest.attempts[0]?.objL1, "1005");
+});
+
+test("guessDefaultDimensionValue prefers 대한민국 for country dimensions", () => {
+  const selected = guessDefaultDimensionValue("국가별", "A", [
+    { id: "1", name: "아시아" },
+    { id: "1005", name: "대한민국" },
+    { id: "1010", name: "아프가니스탄" },
+  ]);
+
+  assert.equal(selected, "1005");
 });

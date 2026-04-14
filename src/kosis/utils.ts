@@ -79,6 +79,76 @@ export function uniqueStrings(values: Array<string | undefined | null>): string[
   return result;
 }
 
+function normalizeLabel(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/\s+/g, "");
+}
+
+function findByPatterns(
+  values: Array<{ id: string; name?: string }>,
+  patterns: string[],
+): string | undefined {
+  return values.find((value) => {
+    const normalizedName = normalizeLabel(value.name);
+    const normalizedId = normalizeLabel(value.id);
+    return patterns.some(
+      (pattern) =>
+        normalizedName.includes(pattern) || normalizedId === pattern,
+    );
+  })?.id;
+}
+
+export function guessDefaultDimensionValue(
+  dimensionName: string | undefined,
+  dimensionId: string | undefined,
+  values: Array<{ id: string; name?: string }>,
+): string | undefined {
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  const normalizedName = normalizeLabel(dimensionName);
+  const normalizedId = normalizeLabel(dimensionId);
+  const isCountryDimension =
+    normalizedName.includes("국가") ||
+    normalizedId === "a" ||
+    normalizedId.includes("country");
+  const isRegionDimension =
+    normalizedName.includes("지역") ||
+    normalizedName.includes("행정구역") ||
+    normalizedId.includes("region");
+  const isSexDimension =
+    normalizedName.includes("성별") || normalizedId.includes("sex");
+
+  if (isCountryDimension) {
+    return findByPatterns(values, [
+      "대한민국",
+      "한국",
+      "korearep.of",
+      "korearep.of.",
+      "korearepof",
+      "korea,rep.of",
+      "republicofkorea",
+      "1005",
+    ]);
+  }
+
+  if (isRegionDimension) {
+    return findByPatterns(values, [
+      "전국",
+      "대한민국",
+      "한국",
+      "전체",
+      "계",
+    ]);
+  }
+
+  if (isSexDimension) {
+    return findByPatterns(values, ["전체", "계", "bothsex", "total", "00", "tot"]);
+  }
+
+  return undefined;
+}
+
 export function tokenizeQuestion(question: string): string[] {
   return uniqueStrings(
     question
