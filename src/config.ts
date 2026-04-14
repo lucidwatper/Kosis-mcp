@@ -74,10 +74,14 @@ function readIntValue(
 export function loadConfig(cwd = process.cwd()): KosisConfig {
   const dotenvValues = parseEnvFile(path.join(cwd, ".env"));
   const apiKey = readEnvValue("KOSIS_API_KEY", dotenvValues);
-  const transportMode =
-    (readEnvValue("MCP_TRANSPORT", dotenvValues) ?? "stdio") === "http"
-      ? "http"
-      : "stdio";
+  const rawTransport = readEnvValue("MCP_TRANSPORT", dotenvValues);
+  const inferredHttp =
+    rawTransport === "http" ||
+    Boolean(readEnvValue("MCP_SERVER_TOKEN", dotenvValues)) ||
+    Boolean(readEnvValue("RENDER", dotenvValues)) ||
+    Boolean(readEnvValue("RENDER_EXTERNAL_URL", dotenvValues)) ||
+    Boolean(readEnvValue("PORT", dotenvValues));
+  const transportMode = inferredHttp ? "http" : "stdio";
 
   if (transportMode === "stdio" && !apiKey) {
     throw new Error(
@@ -104,7 +108,9 @@ export function loadConfig(cwd = process.cwd()): KosisConfig {
     clearCacheOnStart:
       readEnvValue("KOSIS_CACHE_CLEAR_ON_START", dotenvValues) === "1",
     transportMode,
-    host: readEnvValue("HOST", dotenvValues) ?? "127.0.0.1",
+    host:
+      readEnvValue("HOST", dotenvValues) ??
+      (transportMode === "http" ? "0.0.0.0" : "127.0.0.1"),
     port: readIntValue("PORT", dotenvValues, 3000),
     serverToken: readEnvValue("MCP_SERVER_TOKEN", dotenvValues),
   };
