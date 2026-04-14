@@ -70,7 +70,7 @@
 커스텀 커넥터 URL 예시:
 
 ```text
-https://YOUR-RENDER-URL.onrender.com/mcp?oc=YOUR_KOSIS_API_KEY
+https://kosis-mcp-70b9.onrender.com/mcp?oc=YOUR_KOSIS_API_KEY
 ```
 
 이 방식은 가장 간단하지만, URL에 키가 들어가므로 개인 환경에서만 쓰는 것을 권장합니다.
@@ -85,7 +85,7 @@ Cursor/유사 클라이언트 예시:
 {
   "mcpServers": {
     "kosis-remote": {
-      "url": "https://YOUR-RENDER-URL.onrender.com/mcp",
+      "url": "https://kosis-mcp-70b9.onrender.com/mcp",
       "headers": {
         "X-Kosis-Api-Key": "YOUR_KOSIS_API_KEY"
       }
@@ -100,7 +100,7 @@ Cursor/유사 클라이언트 예시:
 {
   "mcpServers": {
     "kosis-remote": {
-      "url": "https://YOUR-RENDER-URL.onrender.com/mcp",
+      "url": "https://kosis-mcp-70b9.onrender.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_MCP_SERVER_TOKEN",
         "X-Kosis-Api-Key": "YOUR_KOSIS_API_KEY"
