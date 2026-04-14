@@ -62,7 +62,7 @@ npm start
 실행 전에 설치 폴더에 `.env` 파일을 하나 만들고 아래처럼 넣으면 됩니다.
 
 ```bash
-KOSIS_API_KEY=YOUR_KOSIS_API_KEY
+KOSIS_API_KEY="YOUR_KOSIS_API_KEY"
 ```
 
 ## 라이선스
