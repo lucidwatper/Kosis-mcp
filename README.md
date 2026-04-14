@@ -1,6 +1,6 @@
 # KOSIS Question MCP
 
-KOSIS OpenAPI를 기반으로 질문형 탐색, 통계표 번들링, 비교분석 초안 생성을 제공하는 로컬 `stdio` MCP 서버입니다.
+KOSIS OpenAPI를 기반으로 질문형 탐색, 통계표 번들링, 비교분석 초안 생성을 제공하는 MCP 서버입니다. 로컬 `stdio`와 원격 `Streamable HTTP` 배포를 모두 지원합니다.
 
 ## Features
 
