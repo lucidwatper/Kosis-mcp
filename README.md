@@ -65,6 +65,13 @@ MCP_SERVER_TOKEN=your-random-server-token
 
 Render Blueprint example is included in `/Users/gglee/Documents/new/render.yaml`.
 
+If Render fails with missing `node:*` modules or `process` type errors during `tsc`, make sure build-time dev dependencies are installed. This repo already sets:
+
+```bash
+buildCommand: npm install --include=dev && npm run build
+NPM_CONFIG_PRODUCTION=false
+```
+
 ## Tools
 
 - `kosis_search_topics`

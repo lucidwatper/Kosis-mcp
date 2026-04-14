@@ -3,7 +3,7 @@ services:
     name: kosis-question-mcp
     runtime: node
     plan: starter
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
@@ -11,8 +11,6 @@ services:
         value: http
       - key: HOST
         value: 0.0.0.0
-      - key: NODE_ENV
-        value: production
       - key: KOSIS_CACHE_DIR
         value: /tmp/kosis-mcp-cache
       - key: KOSIS_CACHE_TTL_MS
@@ -21,5 +19,9 @@ services:
         value: 20000
       - key: KOSIS_DEFAULT_LIMIT
         value: 5
+      - key: NODE_ENV
+        value: production
+      - key: NPM_CONFIG_PRODUCTION
+        value: "false"
       - key: MCP_SERVER_TOKEN
         sync: false
