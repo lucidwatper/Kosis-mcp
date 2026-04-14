@@ -39,6 +39,7 @@ interface StatHtmlInfo {
 interface SelectedClass {
   classId: string;
   values: string[];
+  filterValues: string[];
   sn: string;
 }
 
@@ -236,7 +237,12 @@ function resolveSelectedClasses(
         mappedExplicit,
         meta,
       );
-      return { classId: classInfo.classId, values: hierarchyValues, sn: classInfo.sn };
+      return {
+        classId: classInfo.classId,
+        values: hierarchyValues,
+        filterValues: mappedExplicit,
+        sn: classInfo.sn,
+      };
     }
 
     const inferredDefault = guessDefaultDimensionValue(
@@ -256,6 +262,7 @@ function resolveSelectedClasses(
       return {
         classId: classInfo.classId,
         values: hierarchyValues,
+        filterValues: [inferredDefault],
         sn: classInfo.sn,
       };
     }
@@ -268,6 +275,7 @@ function resolveSelectedClasses(
     return {
       classId: classInfo.classId,
       values: fallback.filter(Boolean),
+      filterValues: fallback.filter(Boolean),
       sn: classInfo.sn,
     };
   });
@@ -321,7 +329,7 @@ function buildSelectedLabelMap(
       const classInfo = (statInfo.classInfoList ?? []).find(
         (entry) => entry.classId === selectedClass.classId,
       );
-      const labels = selectedClass.values.map((valueId) => {
+      const labels = selectedClass.filterValues.map((valueId) => {
         const match = (classInfo?.itmList ?? []).find((item) => item.itmId === valueId);
         return match?.scrKor?.trim() ?? valueId;
       });
@@ -331,26 +339,23 @@ function buildSelectedLabelMap(
 }
 
 function buildFieldList(
-  statInfo: StatHtmlInfo,
-  options?: PreviewRequestOptions,
+  selectedItems: string[],
+  selectedClasses: SelectedClass[],
+  periodCode: string,
+  periods: string[],
 ): string {
-  const periodCode = resolveDefaultPeriodCode(statInfo);
-  const periods = resolvePeriodList(statInfo, periodCode, options);
-  const items = resolveSelectedItems(statInfo, options);
-  const classes = resolveSelectedClasses(statInfo, options);
-
   const fieldList = [
     {
       targetId: "PRD",
       targetValue: "",
       prdValue: `${periodCode},${periods.join(",")},@`,
     },
-    ...items.map((itemId) => ({
+    ...selectedItems.map((itemId) => ({
       targetId: "ITM_ID",
       targetValue: itemId,
       prdValue: "",
     })),
-    ...classes.flatMap((classInfo, index) =>
+    ...selectedClasses.flatMap((classInfo, index) =>
       classInfo.values.map((value) => ({
         targetId: `OV_L${index + 1}_ID`,
         targetValue: value,
@@ -363,13 +368,10 @@ function buildFieldList(
 }
 
 function buildDefaultClassArr(
-  statInfo: StatHtmlInfo,
-  options?: PreviewRequestOptions,
+  selectedClasses: SelectedClass[],
 ): string {
-  const classes = resolveSelectedClasses(statInfo, options);
-
   return JSON.stringify(
-    classes.map((classInfo) => ({
+    selectedClasses.map((classInfo) => ({
       objVarId: classInfo.classId,
       data: classInfo.values,
       classType: 1,
@@ -379,21 +381,19 @@ function buildDefaultClassArr(
 }
 
 function buildDefaultItemArr(
-  statInfo: StatHtmlInfo,
-  options?: PreviewRequestOptions,
+  selectedItems: string[],
 ): string {
-  return JSON.stringify([{ data: resolveSelectedItems(statInfo, options) }]);
+  return JSON.stringify([{ data: selectedItems }]);
 }
 
 function buildDefaultPeriodArr(
-  statInfo: StatHtmlInfo,
-  options?: PreviewRequestOptions,
+  periodCode: string,
+  periods: string[],
 ): string {
-  const periodCode = resolveDefaultPeriodCode(statInfo);
-  const periods = resolvePeriodList(statInfo, periodCode, options).map((value) =>
+  const parsedPeriods = periods.map((value) =>
     Number.parseInt(value, 10),
   );
-  return JSON.stringify({ [periodCode]: periods });
+  return JSON.stringify({ [periodCode]: parsedPeriods });
 }
 
 function buildClassAllArr(statInfo: StatHtmlInfo): string {
@@ -696,7 +696,7 @@ export async function fetchHtmlPreviewFallback(
     );
   const mixItemCount = itemMultiply * Math.max(periods.length, 1);
 
-  params.set("fieldList", buildFieldList(statInfo, options));
+  params.set("fieldList", buildFieldList(selectedItems, selectedClasses, periodCode, periods));
   params.set("colAxis", (statInfo.pivotInfo?.colList ?? []).join(","));
   params.set("rowAxis", (statInfo.pivotInfo?.rowList ?? []).join(","));
   params.set("isFirst", "N");
@@ -704,9 +704,9 @@ export async function fetchHtmlPreviewFallback(
   params.set("viewKind", "1");
   params.set("viewSubKind", "");
   params.set("doAnal", "N");
-  params.set("defaulPeriodArr", buildDefaultPeriodArr(statInfo, options));
-  params.set("defaultClassArr", buildDefaultClassArr(statInfo, options));
-  params.set("defaultItmArr", buildDefaultItemArr(statInfo, options));
+  params.set("defaulPeriodArr", buildDefaultPeriodArr(periodCode, periods));
+  params.set("defaultClassArr", buildDefaultClassArr(selectedClasses));
+  params.set("defaultItmArr", buildDefaultItemArr(selectedItems));
   params.set("classAllArr", buildClassAllArr(statInfo));
   params.set("classSet", buildClassSet(statInfo));
   params.set("selectAllFlag", "N");

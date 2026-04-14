@@ -598,8 +598,8 @@ test("filterRowsToSelectedClasses keeps only rows matching selected country labe
     ["tableKey", "2) 국가(1)", "2) 국가(2)", "성별", "2023"],
     statInfo,
     [
-      { classId: "2UNS", values: ["1005"], sn: "1" },
-      { classId: "SBB", values: ["0"], sn: "2" },
+      { classId: "2UNS", values: ["1", "1005"], filterValues: ["1005"], sn: "1" },
+      { classId: "SBB", values: ["0"], filterValues: ["0"], sn: "2" },
     ],
   );
 
