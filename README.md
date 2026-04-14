@@ -59,17 +59,19 @@ MCP 설정에 아래처럼 추가하면 됩니다.
 
 헤더를 넣을 수 있는 환경이라면 이 방식이 가장 깔끔합니다.
 
-### 3) 내 컴퓨터에서 직접 실행하기
+### 3) 내 컴퓨터에 내려받아 직접 실행하기
 
 Node.js 22 이상 기준입니다.
 
 ```bash
+git clone https://github.com/lucidwatper/Kosis-mcp.git
+cd Kosis-mcp
 npm install
 npm run build
 npm start
 ```
 
-`.env` 파일에는 아래처럼 넣으면 됩니다.
+실행 전에 `.env` 파일을 하나 만들고 아래처럼 넣으면 됩니다.
 
 ```bash
 KOSIS_API_KEY=YOUR_KOSIS_API_KEY
