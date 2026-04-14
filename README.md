@@ -36,9 +36,9 @@ npm run build
 npm start
 ```
 
-Before running, edit `/Users/gglee/Documents/new/.env` and replace `PUT_YOUR_KOSIS_API_KEY_HERE` with your real key.
+Before running locally, create a `.env` file from `.env.example` and replace the placeholder value with your real key.
 
-For MCP client registration, a ready-to-edit example is available at `/Users/gglee/Documents/new/codex-mcp.config.example.json`.
+For local MCP client registration, a ready-to-edit example is available in `codex-mcp.config.example.json`.
 
 ## Render Deploy
 
@@ -63,7 +63,7 @@ PORT=10000
 MCP_SERVER_TOKEN=your-random-server-token
 ```
 
-Render Blueprint example is included in `/Users/gglee/Documents/new/render.yaml`.
+Render Blueprint example is included in `render.yaml`.
 
 If Render fails with missing `node:*` modules or `process` type errors during `tsc`, make sure build-time dev dependencies are installed. This repo already sets:
 
