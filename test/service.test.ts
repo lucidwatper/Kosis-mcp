@@ -144,14 +144,17 @@ class FakeClient {
   }
 }
 
-test("searchTopics returns ranked results and query plan", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-search", 10_000);
+async function createService(
+  cacheDir: string,
+  client: FakeClient = new FakeClient(),
+): Promise<KosisService> {
+  const cache = new FileCache(cacheDir, 10_000);
   await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  return new KosisService(client as never, cache, 5);
+}
+
+test("searchTopics returns ranked results and query plan", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-search");
 
   const result = await service.searchTopics("고용 상황이 궁금해", [], 5);
 
@@ -161,13 +164,7 @@ test("searchTopics returns ranked results and query plan", async () => {
 });
 
 test("getTableBundle combines preview, meta and explanation", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-bundle", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  const service = await createService("/tmp/kosis-question-mcp-test-bundle");
 
   const bundle = await service.getTableBundle("101", "DT_TEST_A", "Y");
 
@@ -179,13 +176,7 @@ test("getTableBundle combines preview, meta and explanation", async () => {
 });
 
 test("compareTables exposes shared dimensions and units", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-compare", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  const service = await createService("/tmp/kosis-question-mcp-test-compare");
 
   const comparison = await service.compareTables([
     { orgId: "101", tblId: "DT_TEST_A" },
@@ -198,13 +189,7 @@ test("compareTables exposes shared dimensions and units", async () => {
 });
 
 test("getTableBundle supports explicit dimension selections for preview retries", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-selection", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  const service = await createService("/tmp/kosis-question-mcp-test-selection");
 
   const bundle = await service.getTableBundle("101", "DT_TEST_A", "Y", {
     dimensionSelections: {
@@ -220,13 +205,7 @@ test("getTableBundle supports explicit dimension selections for preview retries"
 });
 
 test("searchTopics normalizes Korean particles and still finds employment tables", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-normalize", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  const service = await createService("/tmp/kosis-question-mcp-test-normalize");
 
   const result = await service.searchTopics("청년 고용과 실업 관련 통계를 비교해서 볼 수 있는 자료를 찾아줘", [], 5);
 
@@ -234,13 +213,7 @@ test("searchTopics normalizes Korean particles and still finds employment tables
 });
 
 test("answerBundle carries inferred preview selections into selected tables", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-answer", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new FakeClient() as never,
-    cache,
-    5,
-  );
+  const service = await createService("/tmp/kosis-question-mcp-test-answer");
 
   const answer = await service.answerBundle(
     "고용과 실업을 비교해서 보고 싶어",
@@ -336,12 +309,9 @@ class CountryDefaultClient extends FakeClient {
 }
 
 test("getTableBundle defaults country dimensions to 대한민국 when available", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-country-default", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new CountryDefaultClient() as never,
-    cache,
-    5,
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-country-default",
+    new CountryDefaultClient(),
   );
 
   const bundle = await service.getTableBundle("101", "DT_TEST_COUNTRY", "Y");
@@ -528,12 +498,9 @@ class NeetSelectionClient extends FakeClient {
 }
 
 test("answerBundle prioritizes NEET tables when the question asks for NEET comparison", async () => {
-  const cache = new FileCache("/tmp/kosis-question-mcp-test-neet-selection", 10_000);
-  await cache.clearAll();
-  const service = new KosisService(
-    new NeetSelectionClient() as never,
-    cache,
-    5,
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-neet-selection",
+    new NeetSelectionClient(),
   );
 
   const answer = await service.answerBundle(
@@ -598,8 +565,23 @@ test("filterRowsToSelectedClasses keeps only rows matching selected country labe
     ["tableKey", "2) 국가(1)", "2) 국가(2)", "성별", "2023"],
     statInfo,
     [
-      { classId: "2UNS", values: ["1", "1005"], filterValues: ["1005"], sn: "1" },
-      { classId: "SBB", values: ["0"], filterValues: ["0"], sn: "2" },
+      {
+        classId: "2UNS",
+        values: ["1", "1005"],
+        filterValues: ["1005"],
+        levelGroups: [
+          { level: 1, values: ["1"] },
+          { level: 2, values: ["1005"] },
+        ],
+        sn: "1",
+      },
+      {
+        classId: "SBB",
+        values: ["0"],
+        filterValues: ["0"],
+        levelGroups: [{ level: 1, values: ["0"] }],
+        sn: "2",
+      },
     ],
   );
 
