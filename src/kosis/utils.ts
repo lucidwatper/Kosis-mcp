@@ -35,6 +35,14 @@ const STOP_WORDS = new Set([
   "find",
   "about",
   "data",
+  "지난",
+  "어떻게",
+  "변했는지",
+  "추이",
+  "비교분석",
+  "비교분석해줘",
+  "변화",
+  "얼마나",
 ]);
 
 const TRAILING_PARTICLES = [
@@ -165,7 +173,18 @@ export function tokenizeQuestion(question: string): string[] {
         }
         return normalized;
       })
-      .filter((token) => token.length >= 2 && !STOP_WORDS.has(token)),
+      .filter((token) => {
+        if (token.length < 2 || STOP_WORDS.has(token)) {
+          return false;
+        }
+        if (/^\d+년(간|동안)?$/.test(token)) {
+          return false;
+        }
+        if (/^\d+개월(간|동안)?$/.test(token)) {
+          return false;
+        }
+        return true;
+      }),
   );
 }
 

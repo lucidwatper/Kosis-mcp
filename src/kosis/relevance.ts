@@ -21,6 +21,11 @@ function queryPairs(tokens: string[]): string[] {
   return pairs;
 }
 
+function isNaturalSentence(question: string): boolean {
+  const trimmed = question.trim();
+  return trimmed.length >= 20 || /\s/.test(trimmed);
+}
+
 function inferDomainHints(tokens: string[]): string[] {
   const hints: string[] = [];
   const hasEmployment = tokens.some((token) =>
@@ -47,6 +52,25 @@ function inferDomainHints(tokens: string[]): string[] {
     hints.push("취업자수");
   }
 
+  const hasCard = tokens.some((token) => ["신용카드", "카드"].includes(token));
+  const hasCount = tokens.some((token) => ["건수", "이용건수", "사용건수"].includes(token));
+  const hasAmount = tokens.some((token) => ["금액", "이용금액", "사용금액"].includes(token));
+  const hasKorea = tokens.some((token) => ["대한민국", "한국", "국내"].includes(token));
+
+  if (hasCard) {
+    if (hasCount && hasAmount) {
+      hints.push("신용카드 이용건수 이용금액");
+      hints.push("신용카드 건수 금액");
+    } else if (hasCount) {
+      hints.push("신용카드 이용건수");
+    } else if (hasAmount) {
+      hints.push("신용카드 이용금액");
+    } else {
+      hints.push("신용카드 이용실적");
+    }
+    hints.push(hasKorea ? "대한민국 신용카드" : "신용카드");
+  }
+
   return hints;
 }
 
@@ -55,24 +79,25 @@ export function buildQueryPlan(
   searchHints: string[] = [],
 ): { keywords: string[]; queryPlan: QueryPlanItem[] } {
   const keywords = tokenizeQuestion(question);
+  const compressedQuery = keywords.slice(0, 6).join(" ");
   const generated = uniqueStrings([
-    question.trim(),
-    keywords.slice(0, 6).join(" "),
-    ...queryPairs(keywords).slice(0, 2),
+    compressedQuery,
     ...inferDomainHints(keywords),
+    ...queryPairs(keywords).slice(0, 2),
     ...searchHints,
+    ...(!isNaturalSentence(question) ? [question.trim()] : []),
   ]).filter(Boolean);
 
   const queryPlan = generated.map((query, index) => ({
     query,
     reason:
-      index === 0
-        ? "원문 질문"
-        : index === 1
-          ? "핵심 키워드 압축"
-          : queryPairs(keywords).includes(query)
-            ? "연속 키워드 조합"
-            : "사용자 힌트",
+      query === compressedQuery
+        ? "핵심 키워드 압축"
+        : queryPairs(keywords).includes(query)
+          ? "연속 키워드 조합"
+          : query === question.trim()
+            ? "원문 질문"
+            : "도메인 힌트",
   }));
 
   return { keywords, queryPlan };
@@ -81,6 +106,63 @@ export function buildQueryPlan(
 function boostFromRecommendation(record: JsonRecord): number {
   const value = String(record.REC_TBL_SE ?? "").toLowerCase();
   return value === "y" || value === "yes" || value === "1" ? 12 : 0;
+}
+
+function containsAny(text: string, needles: string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
+}
+
+function computeDomainScore(tokens: string[], record: JsonRecord): number {
+  const title = `${readString(record, "TBL_NM") ?? ""} ${readString(record, "STAT_NM") ?? ""}`.toLowerCase();
+  const path = `${readString(record, "MT_ATITLE") ?? ""} ${readString(record, "FULL_PATH_ID") ?? ""}`.toLowerCase();
+  const contents = `${readString(record, "CONTENTS") ?? ""} ${readString(record, "ITEM03") ?? ""}`.toLowerCase();
+
+  let score = 0;
+  const hasCardIntent = tokens.some((token) => ["신용카드", "카드"].includes(token));
+  const hasCountIntent = tokens.some((token) => ["건수", "이용건수", "사용건수"].includes(token));
+  const hasAmountIntent = tokens.some((token) => ["금액", "이용금액", "사용금액"].includes(token));
+  const hasKoreaIntent = tokens.some((token) => ["대한민국", "한국", "국내"].includes(token));
+
+  if (hasCardIntent) {
+    if (title.trim() === "신용카드" || title.startsWith("신용카드 ")) {
+      score += 46;
+    } else if (containsAny(title, ["신용카드"])) {
+      score += 28;
+    } else if (containsAny(path, ["신용카드", "지급결제"])) {
+      score += 12;
+    } else if (containsAny(contents, ["신용카드"])) {
+      score -= 18;
+    }
+
+    if (containsAny(title, ["소득공제", "연말정산"])) {
+      score -= 28;
+    }
+    if (containsAny(contents, ["소득공제", "연말정산"])) {
+      score -= 18;
+    }
+  }
+
+  if (hasCountIntent) {
+    if (containsAny(title, ["이용건수", "건수"])) {
+      score += 14;
+    } else if (containsAny(contents, ["이용건수", "건수"])) {
+      score += 4;
+    }
+  }
+
+  if (hasAmountIntent) {
+    if (containsAny(title, ["이용금액", "금액"])) {
+      score += 14;
+    } else if (containsAny(contents, ["이용금액", "금액"])) {
+      score += 4;
+    }
+  }
+
+  if (hasKoreaIntent && containsAny(path, ["금융", "지급결제"])) {
+    score += 10;
+  }
+
+  return score;
 }
 
 function resultWhyMatched(
@@ -123,6 +205,7 @@ export function scoreSearchRecord(
   let score = 100 - queryIndex * 10 - rankIndex * 4;
   score += overlap * 6;
   score += boostFromRecommendation(record);
+  score += computeDomainScore(tokens, record);
 
   const title = `${readString(record, "TBL_NM") ?? ""} ${readString(record, "STAT_NM") ?? ""}`.toLowerCase();
   if (query && title.includes(query.toLowerCase())) {

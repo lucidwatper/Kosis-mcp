@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { FileCache } from "../src/kosis/cache.js";
 import { filterRowsToSelectedClasses } from "../src/kosis/html-fallback.js";
+import { buildQueryPlan, scoreSearchRecord } from "../src/kosis/relevance.js";
 import { KosisService } from "../src/kosis/service.js";
 import type { JsonRecord } from "../src/kosis/types.js";
 import { guessDefaultDimensionValue } from "../src/kosis/utils.js";
@@ -210,6 +211,60 @@ test("searchTopics normalizes Korean particles and still finds employment tables
   const result = await service.searchTopics("청년 고용과 실업 관련 통계를 비교해서 볼 수 있는 자료를 찾아줘", [], 5);
 
   assert.ok(result.queryPlan.some((item) => item.query.includes("고용 취업 실업")));
+});
+
+test("buildQueryPlan strips temporal noise and adds card usage hints", () => {
+  const result = buildQueryPlan(
+    "대한민국 지난 10년동안의 신용카드 사용 건수와 금액이 어떻게 변했는지 비교분석해줘",
+  );
+
+  assert.deepEqual(result.keywords, ["대한민국", "신용카드", "사용", "건수", "금액"]);
+  assert.ok(
+    result.queryPlan.some((item) => item.query === "신용카드 이용건수 이용금액"),
+  );
+  assert.ok(
+    !result.queryPlan.some((item) => item.query.includes("지난 10년동안")),
+  );
+});
+
+test("scoreSearchRecord prefers direct credit card tables over tax deduction mentions", () => {
+  const tokens = ["대한민국", "신용카드", "사용", "건수", "금액"];
+
+  const direct = scoreSearchRecord(
+    tokens,
+    "신용카드 이용건수 이용금액",
+    0,
+    1,
+    {
+      ORG_ID: "301",
+      TBL_ID: "DT_601Y003",
+      TBL_NM: "신용카드",
+      STAT_NM: "지급결제통계",
+      MT_ATITLE: "금융 > 지급결제통계",
+      CONTENTS: "전체 이용건수 전체 이용금액 개인 일반구매 이용건수 개인 일반구매 이용금액 신용카드",
+      STRT_PRD_DE: "1997",
+      END_PRD_DE: "2026",
+    },
+  );
+
+  const distractor = scoreSearchRecord(
+    tokens,
+    "대한민국 신용카드 사용 건수 금액",
+    0,
+    0,
+    {
+      ORG_ID: "133",
+      TBL_ID: "DT_133N_1234",
+      TBL_NM: "외국인근로자 근로소득 연말정산 신고 현황",
+      STAT_NM: "국세통계",
+      MT_ATITLE: "정부ㆍ재정 > 국세통계",
+      CONTENTS: "신용카드 소득공제 금액 인원 연말정산",
+      STRT_PRD_DE: "2007",
+      END_PRD_DE: "2021",
+    },
+  );
+
+  assert.ok(direct.score > distractor.score);
 });
 
 test("answerBundle carries inferred preview selections into selected tables", async () => {
