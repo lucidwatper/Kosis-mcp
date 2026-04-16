@@ -2,6 +2,7 @@ import { FileCache } from "./cache.js";
 import { KosisClient } from "./client.js";
 import { KosisApiError } from "./errors.js";
 import { fetchHtmlPreviewFallback } from "./html-fallback.js";
+import { inferQuestionIntent } from "./intent.js";
 import {
   buildQueryPlan,
   normalizeSearchRecord,
@@ -19,6 +20,7 @@ import type {
   PreviewDimensionGuide,
   PreviewGuide,
   PreviewRequestOptions,
+  QueryIntent,
   SearchTopicsResult,
   TableIdentity,
 } from "./types.js";
@@ -27,7 +29,6 @@ import {
   readString,
   tableKey,
   textFromRecord,
-  tokenizeQuestion,
   uniqueStrings,
 } from "./utils.js";
 
@@ -65,6 +66,31 @@ function mapPeriodCode(raw?: string): string {
 
 function derivePreviewPlan(meta: KosisMetaBundle, preferredPrdSe?: string): PreviewPlan {
   return derivePreviewPlanWithSelections(meta, preferredPrdSe, undefined);
+}
+
+function availablePeriodCodes(meta: KosisMetaBundle): string[] {
+  return uniqueStrings(meta.period.map((row) => readString(row, "PRD_SE")));
+}
+
+function resolvePreferredPeriodCode(
+  meta: KosisMetaBundle,
+  preferredPrdSe?: string,
+): string | undefined {
+  const available = availablePeriodCodes(meta).map((value) => value?.toUpperCase());
+  if (available.length === 0) {
+    return preferredPrdSe;
+  }
+
+  const mappedPreferred = mapPeriodCode(preferredPrdSe);
+  if (available.includes(mappedPreferred)) {
+    return mappedPreferred;
+  }
+
+  if (available.includes("Y")) {
+    return "Y";
+  }
+
+  return available[0];
 }
 
 function buildPreviewGuide(meta: KosisMetaBundle): PreviewGuide {
@@ -410,17 +436,74 @@ function chooseDimensionSelections(
 
 function inferPreviewOptions(
   bundle: KosisTableBundle,
-  keywords: string[],
+  intent: QueryIntent,
 ): PreviewRequestOptions | undefined {
-  const itemSelection = chooseItemSelection(
-    bundle.previewGuide,
-    keywords,
-    bundle.table.title,
-  );
+  const measurePatterns = intent.measures.length > 0 ? intent.measures : intent.keywords;
   const dimensionSelections = chooseDimensionSelections(
     bundle.previewGuide,
-    keywords,
+    intent.keywords,
   );
+
+  if (intent.geographyScope === "national") {
+    for (const dimension of bundle.previewGuide.dimensions) {
+      if (dimension.name.includes("지역") || dimension.name.includes("국가")) {
+        const match = dimension.values.find((value) =>
+          ["전국", "대한민국", "한국", "계", "합계"].some((candidate) =>
+            value.name.includes(candidate),
+          ),
+        );
+        if (match) {
+          dimensionSelections[dimension.name] = match.name;
+        }
+      }
+    }
+  }
+
+  if (intent.sexSelection) {
+    for (const dimension of bundle.previewGuide.dimensions) {
+      if (dimension.name.includes("성별")) {
+        const match = dimension.values.find((value) => value.name.includes(intent.sexSelection!));
+        if (match) {
+          dimensionSelections[dimension.name] = match.name;
+        }
+      }
+    }
+  }
+
+  if (intent.ageSelection) {
+    for (const dimension of bundle.previewGuide.dimensions) {
+      if (dimension.name.includes("연령")) {
+        const match = dimension.values.find((value) =>
+          value.name.includes(intent.ageSelection!),
+        );
+        if (match) {
+          dimensionSelections[dimension.name] = match.name;
+        }
+      }
+    }
+  }
+
+  let itemSelection = chooseItemSelection(
+    bundle.previewGuide,
+    intent.keywords,
+    bundle.table.title,
+  );
+
+  for (const dimension of bundle.previewGuide.dimensions) {
+    const measureMatch = dimension.values.find((value) =>
+      measurePatterns.some((measure) => value.name.includes(measure)),
+    );
+    if (measureMatch) {
+      dimensionSelections[dimension.name] = measureMatch.name;
+    }
+  }
+
+  const optionMatch = bundle.previewGuide.itemOptions.find((option) =>
+    measurePatterns.some((measure) => option.name.includes(measure)),
+  );
+  if (optionMatch) {
+    itemSelection = optionMatch.name;
+  }
 
   if (!itemSelection && Object.keys(dimensionSelections).length === 0) {
     return undefined;
@@ -430,28 +513,34 @@ function inferPreviewOptions(
     itemSelection,
     dimensionSelections:
       Object.keys(dimensionSelections).length > 0 ? dimensionSelections : undefined,
-    newEstPrdCnt: 3,
+    newEstPrdCnt: intent.recentPeriods ? Math.min(intent.recentPeriods, 24) : 3,
+    startPrdDe: intent.startPrdDe,
+    endPrdDe: intent.endPrdDe,
   };
 }
 
 function computeQuestionBonus(
   bundle: KosisTableBundle,
-  keywords: string[],
+  intent: QueryIntent,
 ): number {
   let bonus = 0;
   const title = bundle.table.title;
   const optionNames = bundle.previewGuide.itemOptions.map((option) => option.name);
   const dimensionNames = bundle.previewGuide.dimensions.map((dimension) => dimension.name);
+  const dimensionValueNames = bundle.previewGuide.dimensions.flatMap((dimension) =>
+    dimension.values.map((value) => value.name),
+  );
   const contextText = [
     title,
     ...optionNames,
+    ...dimensionValueNames,
     ...bundle.meta.comments.map((comment) => readString(comment, "CMMT_DC") ?? ""),
     readString(bundle.explanation ?? {}, "statsNm") ?? "",
   ]
     .join(" ")
     .toLowerCase();
   const hasKeyword = (needle: string) =>
-    keywords.some((keyword) => keyword.includes(needle));
+    intent.keywords.some((keyword) => keyword.includes(needle));
   const hasNeetSignal =
     contextText.includes("neet") ||
     ((contextText.includes("교육") || contextText.includes("고용")) &&
@@ -459,9 +548,24 @@ function computeQuestionBonus(
       (contextText.includes("참여하지") || contextText.includes("있지 않는")));
 
   if (hasKeyword("실업")) {
-    if (title.includes("실업") || optionNames.some((name) => name.includes("실업"))) {
-      bonus += 18;
+    if (
+      title.includes("실업") ||
+      optionNames.some((name) => name.includes("실업")) ||
+      dimensionValueNames.some((name) => name.includes("실업"))
+    ) {
+      bonus += 24;
     }
+    if (title.includes("고용보조지표")) {
+      bonus -= 14;
+    }
+  }
+
+  if (
+    intent.measures.some((measure) =>
+      dimensionValueNames.some((name) => name === measure),
+    )
+  ) {
+    bonus += 12;
   }
 
   if (hasKeyword("고용") || hasKeyword("취업")) {
@@ -469,6 +573,9 @@ function computeQuestionBonus(
       title.includes("고용") ||
       title.includes("취업") ||
       optionNames.some(
+        (name) => name.includes("고용") || name.includes("취업"),
+      ) ||
+      dimensionValueNames.some(
         (name) => name.includes("고용") || name.includes("취업"),
       )
     ) {
@@ -498,6 +605,99 @@ function computeQuestionBonus(
 
   if (title.includes("비경제활동") && !hasKeyword("비경제활동")) {
     bonus -= 6;
+  }
+
+  if (intent.geographyScope === "national") {
+    if (contextText.includes("세계") || contextText.includes("ilo") || contextText.includes("국제")) {
+      bonus -= 34;
+    }
+    if (dimensionNames.some((name) => name.includes("시도"))) {
+      bonus -= 8;
+    }
+    if (dimensionNames.some((name) => name.includes("성별"))) {
+      bonus += 4;
+    }
+    if (title.includes("총괄")) {
+      bonus += 6;
+    }
+    const hasNationalValue = dimensionValueNames.some((name) =>
+      ["대한민국", "전국", "한국", "계"].some((candidate) => name.includes(candidate)),
+    );
+    if (!hasNationalValue && dimensionNames.some((name) => name.includes("국가") || name.includes("지역"))) {
+      bonus -= 28;
+    }
+  }
+
+  if (!intent.sexSelection && (title.includes("여성") || title.includes("남성"))) {
+    bonus -= 36;
+  }
+
+  if (hasKeyword("실업") && contextText.includes("경제활동인구조사")) {
+    bonus += 14;
+  }
+
+  if (intent.measures.includes("실업률")) {
+    if (dimensionValueNames.some((name) => name === "실업률")) {
+      bonus += 18;
+    }
+    if (title.includes("경제활동인구 총괄")) {
+      bonus += 10;
+    }
+  }
+
+  if (intent.preferredPrdSe === "Y") {
+    const periodCodes = availablePeriodCodes(bundle.meta);
+    if (periodCodes.includes("년") || periodCodes.includes("Y")) {
+      bonus += 12;
+    } else if (periodCodes.includes("월") || periodCodes.includes("M")) {
+      bonus -= 6;
+    }
+  }
+
+  return bonus;
+}
+
+function computeSelectionBonus(
+  bundle: KosisTableBundle,
+  intent: QueryIntent,
+  autoSelections?: PreviewRequestOptions,
+): number {
+  if (!autoSelections) {
+    return 0;
+  }
+
+  let bonus = 0;
+  const selectedItem = autoSelections.itemSelection ?? "";
+  const selectedDimensions = Object.values(autoSelections.dimensionSelections ?? {})
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .join(" ");
+
+  const selectionText = `${selectedItem} ${selectedDimensions}`.toLowerCase();
+
+  for (const measure of intent.measures) {
+    if (selectionText.includes(measure.toLowerCase())) {
+      bonus += 18;
+    }
+  }
+
+  if (intent.geographyScope === "national" && /전국|대한민국|한국|계|합계/.test(selectionText)) {
+    bonus += 10;
+  }
+
+  if (intent.sexSelection && selectionText.includes(intent.sexSelection.toLowerCase())) {
+    bonus += 6;
+  }
+
+  if (
+    intent.preferredPrdSe === "Y" &&
+    autoSelections.startPrdDe &&
+    autoSelections.endPrdDe
+  ) {
+    bonus += 6;
+  }
+
+  if (bundle.dataPreview.length > 0) {
+    bonus += 4;
   }
 
   return bonus;
@@ -750,6 +950,7 @@ export class KosisService {
     }
 
     const effectivePrdSe =
+      resolvePreferredPeriodCode(meta, prdSe) ??
       prdSe ??
       readString(meta.updatedAt[0] ?? {}, "PRD_SE") ??
       readString(meta.period[0] ?? {}, "PRD_SE") ??
@@ -872,13 +1073,17 @@ export class KosisService {
     },
   ): Promise<AnswerBundle> {
     const limit = options?.limit ?? this.defaultLimit;
-    const search = await this.searchTopics(question, options?.searchHints ?? [], limit);
-    const keywords = tokenizeQuestion(question);
+    const intent = inferQuestionIntent(question);
+    const search = await this.searchTopics(
+      question,
+      uniqueStrings([...(options?.searchHints ?? []), ...intent.searchHints]),
+      limit,
+    );
     const comparisonMode = options?.comparisonMode ?? "auto";
     const inspectedResults = search.results.slice(0, Math.min(5, search.results.length));
     const baseBundles = await Promise.all(
       inspectedResults.map((result) =>
-        this.getTableBundle(result.orgId, result.tblId, undefined),
+        this.getTableBundle(result.orgId, result.tblId, intent.preferredPrdSe),
       ),
     );
 
@@ -886,7 +1091,7 @@ export class KosisService {
       .map((result, index) => ({
         result,
         baseBundle: baseBundles[index],
-        bonus: computeQuestionBonus(baseBundles[index], keywords),
+        bonus: computeQuestionBonus(baseBundles[index], intent),
       }))
       .sort(
         (left, right) =>
@@ -897,27 +1102,38 @@ export class KosisService {
       comparisonMode === "pairwise" ? 2 : Math.min(3, reranked.length);
     const selected = reranked.slice(0, pickedCount);
     const bundles = await Promise.all(
-      selected.map(async ({ result, baseBundle }) => {
-        const autoSelections = inferPreviewOptions(baseBundle, keywords);
+      selected.map(async ({ result, baseBundle, bonus }) => {
+        const autoSelections = inferPreviewOptions(baseBundle, intent);
         if (!autoSelections) {
           return {
             result,
             bundle: baseBundle,
+            bonus,
+            selectionBonus: 0,
+            finalScore: result.score + bonus,
             autoSelections,
           };
         }
 
+        const selectedBundle = await this.getTableBundle(
+          result.orgId,
+          result.tblId,
+          intent.preferredPrdSe,
+          autoSelections,
+        );
+        const selectionBonus = computeSelectionBonus(selectedBundle, intent, autoSelections);
+
         return {
           result,
-          bundle: await this.getTableBundle(
-            result.orgId,
-            result.tblId,
-            undefined,
-            autoSelections,
-          ),
+          bundle: selectedBundle,
+          bonus,
+          selectionBonus,
+          finalScore: result.score + bonus + selectionBonus,
           autoSelections,
         };
       }),
+    ).then((entries) =>
+      entries.sort((left, right) => right.finalScore - left.finalScore),
     );
 
     const comparison =
@@ -925,7 +1141,7 @@ export class KosisService {
         ? null
         : buildComparisonResult(
             bundles.map((entry) => entry.bundle),
-            { focus: keywords.join(", ") },
+            { focus: intent.keywords.join(", ") },
           );
 
     const nextQuestions = uniqueStrings([
@@ -943,21 +1159,25 @@ export class KosisService {
         : "",
     ]);
 
-    return {
-      interpretedIntent: {
-        question,
-        keywords,
-        queryPlan: search.queryPlan,
-      },
-      selectedTables: bundles.map(({ result, bundle, autoSelections }) => ({
+    const selectedTables = bundles
+      .map(({ result, bundle, autoSelections, finalScore }) => ({
         ...bundle.table,
         whyMatched: result.whyMatched,
-        score: result.score,
+        score: finalScore,
         warnings: bundle.warnings,
         previewRows: bundle.dataPreview.length,
         previewRequest: bundle.previewRequest,
         autoSelections,
-      })),
+      }))
+      .sort((left, right) => right.score - left.score);
+
+    return {
+      interpretedIntent: {
+        question,
+        keywords: intent.keywords,
+        queryPlan: search.queryPlan,
+      },
+      selectedTables,
       comparison,
       nextQuestions,
       evidence: uniqueStrings([

@@ -43,6 +43,10 @@ const STOP_WORDS = new Set([
   "비교분석해줘",
   "변화",
   "얼마나",
+  "동안",
+  "알려달라",
+  "알려줘",
+  "말해줘",
 ]);
 
 const TRAILING_PARTICLES = [

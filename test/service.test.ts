@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { FileCache } from "../src/kosis/cache.js";
 import { filterRowsToSelectedClasses } from "../src/kosis/html-fallback.js";
+import { inferQuestionIntent } from "../src/kosis/intent.js";
 import { buildQueryPlan, scoreSearchRecord } from "../src/kosis/relevance.js";
 import { KosisService } from "../src/kosis/service.js";
 import type { JsonRecord } from "../src/kosis/types.js";
@@ -227,6 +228,17 @@ test("buildQueryPlan strips temporal noise and adds card usage hints", () => {
   );
 });
 
+test("inferQuestionIntent captures yearly unemployment trend intent", () => {
+  const intent = inferQuestionIntent("지난 10년 동안 대한민국의 실업률 변화를 알려달라");
+
+  assert.deepEqual(intent.keywords, ["대한민국", "실업률"]);
+  assert.deepEqual(intent.measures, ["실업률"]);
+  assert.equal(intent.preferredPrdSe, "Y");
+  assert.equal(intent.geographyScope, "national");
+  assert.ok(intent.startPrdDe);
+  assert.ok(intent.endPrdDe);
+});
+
 test("scoreSearchRecord prefers direct credit card tables over tax deduction mentions", () => {
   const tokens = ["대한민국", "신용카드", "사용", "건수", "금액"];
 
@@ -283,6 +295,14 @@ test("answerBundle carries inferred preview selections into selected tables", as
   assert.ok(
     answer.selectedTables.some((table) => table.previewRequest.itemId === "UNE"),
   );
+});
+
+test("answerBundle prioritizes unemployment table for unemployment question", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-unemployment");
+
+  const answer = await service.answerBundle("대한민국 실업률 변화를 알려달라");
+
+  assert.equal(answer.selectedTables[0]?.tblId, "DT_TEST_B");
 });
 
 class CountryDefaultClient extends FakeClient {

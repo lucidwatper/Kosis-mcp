@@ -63,6 +63,22 @@ export interface PreviewRequestOptions {
   endPrdDe?: string;
 }
 
+export interface QueryIntent {
+  question: string;
+  keywords: string[];
+  measures: string[];
+  searchHints: string[];
+  preferredPrdSe?: "Y" | "M" | "Q" | "S" | "W" | "D";
+  startPrdDe?: string;
+  endPrdDe?: string;
+  recentPeriods?: number;
+  geographyScope: "national" | "regional" | "global" | "unspecified";
+  sexSelection?: "남자" | "여자" | "계";
+  ageSelection?: string;
+  comparison: boolean;
+  wantsExplanation: boolean;
+}
+
 export interface TableIdentity {
   tableKey: string;
   orgId: string;
