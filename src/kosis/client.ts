@@ -23,13 +23,14 @@ export interface DataRequestParams {
 }
 
 export interface MetaRequestParams {
-  type: "TBL" | "ORG" | "PRD" | "ITM" | "CMMT" | "UNIT" | "SOURCE" | "NCD";
+  type: "TBL" | "ORG" | "PRD" | "ITM" | "CMMT" | "UNIT" | "SOURCE" | "NCD" | "WGT";
   orgId: string;
   tblId?: string;
   objId?: string;
   itmId?: string;
   prdSe?: string;
   detail?: string;
+  extraParams?: Record<string, string>;
 }
 
 export interface ExplanationRequestParams {
@@ -37,6 +38,37 @@ export interface ExplanationRequestParams {
   orgId?: string;
   tblId?: string;
   metaItm?: string;
+}
+
+export interface IndicatorLookupParams {
+  indicatorId?: string;
+  indicatorName?: string;
+  pageNo?: number;
+  numOfRows?: number;
+}
+
+export interface IndicatorDetailParams extends IndicatorLookupParams {
+  startPrdDe?: string;
+  endPrdDe?: string;
+  rn?: number;
+  srvRn?: number;
+}
+
+export interface IndicatorListByListIdParams {
+  listId: string;
+  pageNo?: number;
+  numOfRows?: number;
+}
+
+export interface IndicatorListByPeriodParams {
+  prdSe: string;
+  pageNo?: number;
+  numOfRows?: number;
+}
+
+export interface CatalogRequestParams {
+  vwCd: string;
+  parentListId: string;
 }
 
 export class KosisClient {
@@ -170,6 +202,7 @@ export class KosisClient {
       ...(params.itmId ? { itmId: params.itmId } : {}),
       ...(params.prdSe ? { prdSe: params.prdSe } : {}),
       ...(params.detail ? { detail: params.detail } : {}),
+      ...(params.extraParams ?? {}),
     });
   }
 
@@ -186,6 +219,122 @@ export class KosisClient {
       ...(params.statId ? { statId: params.statId } : {}),
       ...(params.orgId ? { orgId: params.orgId } : {}),
       ...(params.tblId ? { tblId: params.tblId } : {}),
+    });
+  }
+
+  async getIndicatorExplanationById(
+    params: Required<Pick<IndicatorLookupParams, "indicatorId">> &
+      Omit<IndicatorLookupParams, "indicatorName">,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/pkNumberService.do", {
+      method: "getList",
+      service: "1",
+      serviceDetail: "pkAll",
+      jipyoId: params.indicatorId,
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getIndicatorExplanationByName(
+    params: Required<Pick<IndicatorLookupParams, "indicatorName">> &
+      Omit<IndicatorLookupParams, "indicatorId">,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/indExpService.do", {
+      method: "getList",
+      service: "2",
+      serviceDetail: "indAll",
+      jipyoNm: params.indicatorName,
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getIndicatorsByListId(
+    params: IndicatorListByListIdParams,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/indiListService.do", {
+      method: "getList",
+      service: "3",
+      listId: params.listId,
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async searchIndicatorLists(params: IndicatorLookupParams): Promise<JsonRecord[]> {
+    if (!params.indicatorId && !params.indicatorName) {
+      throw new KosisApiError(
+        "Indicator list search requires indicatorId or indicatorName.",
+      );
+    }
+
+    return this.requestJson("/openapi/indListSearchRequest.do", {
+      method: "getList",
+      service: "4",
+      serviceDetail: "indList",
+      ...(params.indicatorId ? { jipyoId: params.indicatorId } : {}),
+      ...(params.indicatorName ? { jipyoNm: params.indicatorName } : {}),
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getIndicatorDetailById(
+    params: Required<Pick<IndicatorDetailParams, "indicatorId">> &
+      Omit<IndicatorDetailParams, "indicatorName">,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/indIdDetailSearchRequest.do", {
+      method: "getList",
+      service: "4",
+      serviceDetail: "indIdDetail",
+      jipyoId: params.indicatorId,
+      ...(params.startPrdDe ? { startPrdDe: params.startPrdDe } : {}),
+      ...(params.endPrdDe ? { endPrdDe: params.endPrdDe } : {}),
+      ...(params.rn ? { rn: String(params.rn) } : {}),
+      ...(params.srvRn ? { srvRn: String(params.srvRn) } : {}),
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getIndicatorDetailByName(
+    params: Required<Pick<IndicatorDetailParams, "indicatorName">> &
+      Omit<IndicatorDetailParams, "indicatorId">,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/indDetailSearchRequest.do", {
+      method: "getList",
+      service: "4",
+      serviceDetail: "indDetail",
+      jipyoNm: params.indicatorName,
+      ...(params.startPrdDe ? { startPrdDe: params.startPrdDe } : {}),
+      ...(params.endPrdDe ? { endPrdDe: params.endPrdDe } : {}),
+      ...(params.rn ? { rn: String(params.rn) } : {}),
+      ...(params.srvRn ? { srvRn: String(params.srvRn) } : {}),
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getIndicatorsByPeriod(
+    params: IndicatorListByPeriodParams,
+  ): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/prListSearchRequest.do", {
+      method: "getList",
+      service: "4",
+      serviceDetail: "prList",
+      prdSe: params.prdSe,
+      pageNo: String(params.pageNo ?? 1),
+      numOfRows: String(params.numOfRows ?? 10),
+    });
+  }
+
+  async getStatisticsList(params: CatalogRequestParams): Promise<JsonRecord[]> {
+    return this.requestJson("/openapi/statisticsList.do", {
+      method: "getList",
+      vwCd: params.vwCd,
+      parentListId: params.parentListId,
+      jsonVD: "Y",
     });
   }
 }
