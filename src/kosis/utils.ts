@@ -163,33 +163,37 @@ export function guessDefaultDimensionValue(
 
 export function tokenizeQuestion(question: string): string[] {
   return uniqueStrings(
-    question
-      .toLowerCase()
-      .split(/[\s,./?!:;()[\]{}|"'`~\-_=+]+/)
-      .map((token) => token.trim())
-      .map((token) => {
-        let normalized = token;
-        for (const particle of TRAILING_PARTICLES) {
-          if (normalized.length > particle.length + 1 && normalized.endsWith(particle)) {
-            normalized = normalized.slice(0, -particle.length);
-            break;
-          }
-        }
-        return normalized;
-      })
-      .filter((token) => {
-        if (token.length < 2 || STOP_WORDS.has(token)) {
-          return false;
-        }
-        if (/^\d+년(간|동안)?$/.test(token)) {
-          return false;
-        }
-        if (/^\d+개월(간|동안)?$/.test(token)) {
-          return false;
-        }
-        return true;
-      }),
+    orderedTokenizeQuestion(question),
   );
+}
+
+export function orderedTokenizeQuestion(question: string): string[] {
+  return question
+    .toLowerCase()
+    .split(/[\s,./?!:;()[\]{}|"'`~\-_=+]+/)
+    .map((token) => token.trim())
+    .map((token) => {
+      let normalized = token;
+      for (const particle of TRAILING_PARTICLES) {
+        if (normalized.length > particle.length + 1 && normalized.endsWith(particle)) {
+          normalized = normalized.slice(0, -particle.length);
+          break;
+        }
+      }
+      return normalized;
+    })
+    .filter((token) => {
+      if (token.length < 2 || STOP_WORDS.has(token)) {
+        return false;
+      }
+      if (/^\d+년(간|동안)?$/.test(token)) {
+        return false;
+      }
+      if (/^\d+개월(간|동안)?$/.test(token)) {
+        return false;
+      }
+      return true;
+    });
 }
 
 export function textFromRecord(record: JsonRecord): string {

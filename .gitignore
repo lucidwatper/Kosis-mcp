@@ -5,3 +5,6 @@ dist/
 output/
 .playwright-cli/
 .omx/
+docs/
+
+.DS_Store

@@ -1,6 +1,11 @@
 import type { KosisConfig } from "../config.js";
 import { KosisApiError } from "./errors.js";
-import type { DataPreviewRow, KosisMetaBundle, PreviewRequestOptions } from "./types.js";
+import type {
+  DataPreviewRow,
+  HtmlPreviewResult,
+  KosisMetaBundle,
+  PreviewRequestOptions,
+} from "./types.js";
 import {
   buildBroadFilterClasses,
   buildClassAllArr,
@@ -155,6 +160,61 @@ function applyPreviewRequestParams(
 
 export { filterRowsToSelectedClasses } from "./html-fallback-core.js";
 
+function extractTableBlocks(html: string): string[] {
+  return [...html.matchAll(/<table[\s\S]*?<\/table>/gi)].map((match) => match[0]);
+}
+
+function parseInlineTableCandidates(
+  html: string,
+  tableKey: string,
+  statInfo: Parameters<typeof parseTableHtml>[2],
+  selectedClasses: SelectedClass[],
+): DataPreviewRow[] | null {
+  for (const tableHtml of extractTableBlocks(html)) {
+    const rows = parseTableHtml(
+      tableHtml,
+      tableKey,
+      statInfo,
+      selectedClasses,
+      false,
+    );
+    if (rows.length > 0) {
+      return rows;
+    }
+  }
+  return null;
+}
+
+function previewLabelKey(row: DataPreviewRow): string {
+  const labelEntry = Object.entries(row).find(
+    ([key, value]) =>
+      key !== "tableKey" &&
+      typeof value === "string" &&
+      !/^\s*[\d,.\-]+\s*$/.test(value),
+  );
+  return (typeof labelEntry?.[1] === "string" ? labelEntry[1].trim() : undefined) ?? JSON.stringify(row);
+}
+
+function mergePreviewRows(rows: DataPreviewRow[]): DataPreviewRow[] {
+  const merged = new Map<string, DataPreviewRow>();
+
+  for (const row of rows) {
+    const key = previewLabelKey(row);
+    const current = merged.get(key) ?? { ...row };
+    for (const [column, value] of Object.entries(row)) {
+      if (column === "tableKey") {
+        continue;
+      }
+      if (!(column in current) || current[column] === "" || current[column] === undefined) {
+        current[column] = value;
+      }
+    }
+    merged.set(key, current);
+  }
+
+  return [...merged.values()];
+}
+
 export async function fetchHtmlPreviewFallback(
   config: KosisConfig,
   orgId: string,
@@ -163,7 +223,7 @@ export async function fetchHtmlPreviewFallback(
   options?: PreviewRequestOptions,
   meta?: KosisMetaBundle,
   resolvedSelections?: ResolvedSelectionMap,
-): Promise<DataPreviewRow[] | null> {
+): Promise<HtmlPreviewResult | null> {
   const session = new CookieSession(config);
   const outerHtml = await session.requestText(
     `/statHtml/statHtml.do?orgId=${encodeURIComponent(orgId)}&tblId=${encodeURIComponent(tblId)}`,
@@ -231,12 +291,14 @@ export async function fetchHtmlPreviewFallback(
     resolvedSelections,
   );
   const selectedItems = resolveSelectedItems(statInfo, options);
-  const periodCode = resolveDefaultPeriodCode(statInfo);
+  const periodCode = resolveDefaultPeriodCode(statInfo, options);
   const periods = resolvePeriodList(statInfo, periodCode, options);
 
   const requestPreview = async (
     requestClasses: SelectedClass[],
     filterClasses: SelectedClass[],
+    requestPeriods = periods,
+    requestVariant?: { viewKind?: string; tableType?: string },
   ): Promise<DataPreviewRow[] | null> => {
     applyPreviewRequestParams(
       params,
@@ -244,8 +306,14 @@ export async function fetchHtmlPreviewFallback(
       selectedItems,
       requestClasses,
       periodCode,
-      periods,
+      requestPeriods,
     );
+    if (requestVariant?.viewKind) {
+      params.set("viewKind", requestVariant.viewKind);
+    }
+    if (requestVariant?.tableType) {
+      params.set("tableType", requestVariant.tableType);
+    }
 
     const htmlResponse = await session.requestText("/statHtml/html.do", {
       method: "POST",
@@ -274,13 +342,85 @@ export async function fetchHtmlPreviewFallback(
     return rows.length > 0 ? rows : null;
   };
 
-  const targetedRows = await requestPreview(selectedClasses, selectedClasses);
-  if (targetedRows?.length) {
-    return targetedRows;
+  const previewVariants = [
+    undefined,
+    { viewKind: "2" },
+    { tableType: "grid" },
+  ];
+
+  for (const variant of previewVariants) {
+    const targetedRows = await requestPreview(selectedClasses, selectedClasses, periods, variant);
+    if (targetedRows?.length) {
+      return {
+        rows: targetedRows,
+        periodCode,
+        periods,
+      };
+    }
   }
 
   if (selectedClasses.length > 0) {
-    return requestPreview(buildBroadFilterClasses(statInfo), selectedClasses);
+    for (const variant of previewVariants) {
+      const broadRows = await requestPreview(
+        buildBroadFilterClasses(statInfo),
+        selectedClasses,
+        periods,
+        variant,
+      );
+      if (broadRows?.length) {
+        return {
+          rows: broadRows,
+          periodCode,
+          periods,
+        };
+      }
+    }
+  }
+
+  if (periods.length > 6) {
+    const chunks: string[][] = [];
+    for (let index = 0; index < periods.length; index += 4) {
+      chunks.push(periods.slice(index, index + 4));
+    }
+
+    for (const variant of previewVariants) {
+      const chunkRows: DataPreviewRow[] = [];
+      for (const chunk of chunks) {
+        const rows =
+          (await requestPreview(selectedClasses, selectedClasses, chunk, variant)) ??
+          (selectedClasses.length > 0
+            ? await requestPreview(buildBroadFilterClasses(statInfo), selectedClasses, chunk, variant)
+            : null);
+        if (rows?.length) {
+          chunkRows.push(...rows);
+        }
+      }
+
+      const mergedRows = mergePreviewRows(chunkRows);
+      if (mergedRows.length > 0) {
+        return {
+          rows: mergedRows,
+          periodCode,
+          periods,
+        };
+      }
+    }
+  }
+
+  for (const htmlLane of [contentHtml, rightHtml, outerHtml]) {
+    const inlineRows = parseInlineTableCandidates(
+      htmlLane,
+      tableKey,
+      statInfo,
+      selectedClasses,
+    );
+    if (inlineRows?.length) {
+      return {
+        rows: inlineRows,
+        periodCode,
+        periods,
+      };
+    }
   }
 
   return null;

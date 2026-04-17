@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FileCache } from "../src/kosis/cache.js";
+import { KosisApiError } from "../src/kosis/errors.js";
 import { filterRowsToSelectedClasses } from "../src/kosis/html-fallback.js";
+import { resolveDefaultPeriodCode, resolvePeriodList } from "../src/kosis/html-fallback-core.js";
 import { inferQuestionIntent } from "../src/kosis/intent.js";
 import { buildQueryPlan, scoreSearchRecord } from "../src/kosis/relevance.js";
 import { KosisService } from "../src/kosis/service.js";
@@ -10,7 +12,7 @@ import { guessDefaultDimensionValue } from "../src/kosis/utils.js";
 
 class FakeClient {
   async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
-    if (params.searchNm.includes("없는")) {
+    if (params.searchNm.includes("없는") || params.searchNm.includes("보건")) {
       return [];
     }
 
@@ -44,7 +46,16 @@ class FakeClient {
   async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
     switch (params.type) {
       case "TBL":
-        return [{ TBL_NM: params.tblId === "DT_TEST_A" ? "고용률" : "실업률" }];
+        return [
+          {
+            TBL_NM:
+              params.tblId === "DT_TEST_A"
+                ? "고용률"
+                : params.tblId === "DT_HEALTH_A"
+                  ? "의료인력 현황"
+                  : "실업률",
+          },
+        ];
       case "ORG":
         return [{ ORG_NM: "통계청" }];
       case "PRD":
@@ -57,8 +68,18 @@ class FakeClient {
           {
             OBJ_ID: "ITEM",
             OBJ_NM: "항목",
-            ITM_ID: params.tblId === "DT_TEST_A" ? "EMP" : "UNE",
-            ITM_NM: params.tblId === "DT_TEST_A" ? "고용률" : "실업률",
+            ITM_ID:
+              params.tblId === "DT_TEST_A"
+                ? "EMP"
+                : params.tblId === "DT_HEALTH_A"
+                  ? "MED"
+                  : "UNE",
+            ITM_NM:
+              params.tblId === "DT_TEST_A"
+                ? "고용률"
+                : params.tblId === "DT_HEALTH_A"
+                  ? "의료인력수"
+                  : "실업률",
             UNIT_NM: "%",
           },
           {
@@ -99,16 +120,45 @@ class FakeClient {
       case "UNIT":
         return [{ UNIT_NM: "%" }];
       case "SOURCE":
-        return [{ JOSA_NM: "경제활동인구조사", STAT_ID: params.tblId === "DT_TEST_A" ? "STAT_A" : "STAT_B" }];
+        return [
+          {
+            JOSA_NM: params.tblId === "DT_HEALTH_A" ? "보건통계" : "경제활동인구조사",
+            STAT_ID:
+              params.tblId === "DT_TEST_A"
+                ? "STAT_A"
+                : params.tblId === "DT_HEALTH_A"
+                  ? "STAT_H"
+                  : "STAT_B",
+          },
+        ];
       case "NCD":
         return [{ PRD_SE: "Y", PRD_DE: "2024", SEND_DE: "20250101" }];
+      case "WGT":
+        return [
+          {
+            C1: "ALL",
+            C1_NM: "전국",
+            ITM_ID: params.tblId === "DT_TEST_A" ? "EMP" : "UNE",
+            ITM_NM: params.tblId === "DT_TEST_A" ? "고용률" : "실업률",
+            WGT_CO: "1.0000000000",
+          },
+        ];
       default:
         return [];
     }
   }
 
   async getExplanation(params: { statId?: string }): Promise<JsonRecord[]> {
-    return [{ statsNm: params.statId === "STAT_A" ? "경제활동인구조사 A" : "경제활동인구조사 B" }];
+    return [
+      {
+        statsNm:
+          params.statId === "STAT_A"
+            ? "경제활동인구조사 A"
+            : params.statId === "STAT_H"
+              ? "보건통계 H"
+              : "경제활동인구조사 B",
+      },
+    ];
   }
 
   async getStatisticsData(params: {
@@ -134,24 +184,214 @@ class FakeClient {
 
     return [
       {
-        TBL_NM: params.tblId === "DT_TEST_A" ? "고용률" : "실업률",
+        TBL_NM:
+          params.tblId === "DT_TEST_A"
+            ? "고용률"
+            : params.tblId === "DT_HEALTH_A"
+              ? "의료인력 현황"
+              : "실업률",
         C1_OBJ_NM: "지역",
         C1_NM: "전국",
-        ITM_NM: params.tblId === "DT_TEST_A" ? "고용률" : "실업률",
+        ITM_NM:
+          params.tblId === "DT_TEST_A"
+            ? "고용률"
+            : params.tblId === "DT_HEALTH_A"
+              ? "의료인력수"
+              : "실업률",
         UNIT_NM: "%",
         PRD_DE: "2024",
-        DT: params.tblId === "DT_TEST_A" ? "62.7" : "2.9",
+        DT:
+          params.tblId === "DT_TEST_A"
+            ? "62.7"
+            : params.tblId === "DT_HEALTH_A"
+              ? "123.4"
+              : "2.9",
       },
     ];
+  }
+
+  async getIndicatorExplanationById(params: {
+    indicatorId: string;
+  }): Promise<JsonRecord[]> {
+    return [
+      {
+        statJipyoId: params.indicatorId,
+        statJipyoNm: params.indicatorId === "1001" ? "고용률" : "실업률",
+        jipyoExplan: params.indicatorId === "1001" ? "고용률 설명" : "실업률 설명",
+        jipyoExplan1:
+          params.indicatorId === "1001"
+            ? "취업자 비율에 대한 지표다."
+            : "경제활동인구 대비 실업자 비율이다.",
+      },
+    ];
+  }
+
+  async getIndicatorExplanationByName(params: {
+    indicatorName: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorName.includes("고용")) {
+      return this.getIndicatorExplanationById({ indicatorId: "1001" });
+    }
+    if (params.indicatorName.includes("실업")) {
+      return this.getIndicatorExplanationById({ indicatorId: "1002" });
+    }
+    return [];
+  }
+
+  async searchIndicatorLists(params: {
+    indicatorId?: string;
+    indicatorName?: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorId === "1001" || params.indicatorName?.includes("고용")) {
+      return [
+        {
+          statJipyoId: "1001",
+          statJipyoNm: "고용률",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "연간",
+          strtPrdDe: "2020",
+          endPrdDe: "2024",
+          prdDe: "2024 연간",
+        },
+      ];
+    }
+    if (params.indicatorId === "1002" || params.indicatorName?.includes("실업")) {
+      return [
+        {
+          statJipyoId: "1002",
+          statJipyoNm: "실업률",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "연간",
+          strtPrdDe: "2020",
+          endPrdDe: "2024",
+          prdDe: "2024 연간",
+        },
+      ];
+    }
+    return [];
+  }
+
+  async getIndicatorDetailById(params: {
+    indicatorId: string;
+  }): Promise<JsonRecord[]> {
+    return [
+      {
+        statJipyoId: params.indicatorId,
+        statJipyoNm: params.indicatorId === "1001" ? "고용률" : "실업률",
+        prdSe: "Y",
+        prdDe: "2023",
+        itmNm: params.indicatorId === "1001" ? "고용률" : "실업률",
+        val: params.indicatorId === "1001" ? "62.1" : "3.1",
+        unit: "%",
+      },
+      {
+        statJipyoId: params.indicatorId,
+        statJipyoNm: params.indicatorId === "1001" ? "고용률" : "실업률",
+        prdSe: "Y",
+        prdDe: "2024",
+        itmNm: params.indicatorId === "1001" ? "고용률" : "실업률",
+        val: params.indicatorId === "1001" ? "62.7" : "2.9",
+        unit: "%",
+      },
+    ];
+  }
+
+  async getIndicatorDetailByName(params: {
+    indicatorName: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorName.includes("고용")) {
+      return this.getIndicatorDetailById({ indicatorId: "1001" });
+    }
+    if (params.indicatorName.includes("실업")) {
+      return this.getIndicatorDetailById({ indicatorId: "1002" });
+    }
+    return [];
+  }
+
+  async getStatisticsList(params: {
+    vwCd: string;
+    parentListId: string;
+  }): Promise<JsonRecord[]> {
+    if (params.parentListId === "A") {
+      return [
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_EMP",
+          LIST_NM: "고용",
+        },
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_HEALTH",
+          LIST_NM: "보건",
+        },
+      ];
+    }
+
+    if (params.parentListId === "L_EMP") {
+      return [
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_EMP_SUB",
+          LIST_NM: "고용률",
+          ORG_ID: "101",
+          TBL_ID: "DT_TEST_A",
+          TBL_NM: "고용률",
+          STAT_ID: "STAT_A",
+        },
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_EMP_SUB2",
+          LIST_NM: "실업률",
+          ORG_ID: "101",
+          TBL_ID: "DT_TEST_B",
+          TBL_NM: "실업률",
+          STAT_ID: "STAT_B",
+        },
+      ];
+    }
+
+    if (params.parentListId === "L_HEALTH") {
+      return [
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_HEALTH_WORKFORCE",
+          LIST_NM: "의료인력",
+        },
+      ];
+    }
+
+    if (params.parentListId === "L_HEALTH_WORKFORCE") {
+      return [
+        {
+          VW_CD: params.vwCd,
+          LIST_ID: "L_HEALTH_WORKFORCE_TABLE",
+          LIST_NM: "의료인력 현황",
+          ORG_ID: "101",
+          TBL_ID: "DT_HEALTH_A",
+          TBL_NM: "의료인력 현황",
+          STAT_ID: "STAT_H",
+        },
+      ];
+    }
+
+    return [];
   }
 }
 
 async function createService(
   cacheDir: string,
   client: FakeClient = new FakeClient(),
+  options?: {
+    clearCache?: boolean;
+    ttlMs?: number;
+  },
 ): Promise<KosisService> {
-  const cache = new FileCache(cacheDir, 10_000);
-  await cache.clearAll();
+  const cache = new FileCache(cacheDir, options?.ttlMs ?? 10_000);
+  if (options?.clearCache !== false) {
+    await cache.clearAll();
+  }
   return new KosisService(client as never, cache, 5);
 }
 
@@ -160,9 +400,86 @@ test("searchTopics returns ranked results and query plan", async () => {
 
   const result = await service.searchTopics("고용 상황이 궁금해", [], 5);
 
+  assert.equal(result.cacheStatus, "miss");
   assert.ok(result.queryPlan.length >= 1);
+  assert.ok(result.attempts.length >= 1);
+  assert.equal(result.attempts[0]?.provider, "statisticsSearch");
   assert.equal(result.results[0]?.tblId, "DT_TEST_A");
   assert.ok(result.results[0]?.whyMatched.length);
+});
+
+test("searchIndicators returns ranked indicator results", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-indicator-search");
+
+  const result = await service.searchIndicators("대한민국 실업률 설명을 찾아줘", [], 5);
+
+  assert.ok(result.attempts.length >= 1);
+  assert.ok(result.queryPlan.length >= 1);
+  assert.equal(result.results[0]?.indicatorId, "1002");
+  assert.equal(result.results[0]?.indicatorName, "실업률");
+  assert.ok(result.results[0]?.matchedStrategies.length >= 1);
+});
+
+class Indicator404FallbackClient extends FakeClient {
+  override async searchIndicatorLists(params: {
+    indicatorId?: string;
+    indicatorName?: string;
+  }): Promise<JsonRecord[]> {
+    if (
+      params.indicatorName?.includes("대한민국") ||
+      params.indicatorName?.includes("설명자료") ||
+      params.indicatorName?.includes("경제활동인구조사")
+    ) {
+      throw new KosisApiError("KOSIS request failed with status 404: site moved");
+    }
+    return super.searchIndicatorLists(params);
+  }
+
+  override async getIndicatorExplanationByName(params: {
+    indicatorName: string;
+  }): Promise<JsonRecord[]> {
+    if (
+      params.indicatorName.includes("대한민국") ||
+      params.indicatorName.includes("설명자료")
+    ) {
+      return [];
+    }
+    return super.getIndicatorExplanationByName(params);
+  }
+}
+
+test("searchIndicators survives 404s and falls back to simpler indicator queries", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-indicator-404-fallback",
+    new Indicator404FallbackClient(),
+  );
+
+  const result = await service.searchIndicators("대한민국 실업률 최근 추이를 보여줘", [], 5);
+
+  assert.ok(result.results.length >= 1);
+  assert.equal(result.results[0]?.indicatorId, "1002");
+  assert.ok(result.queryPlan.some((item) => item.query === "실업률 설명자료"));
+  assert.ok(result.attempts.some((attempt) => attempt.outcome === "error" && attempt.errorType === "404"));
+  assert.ok(result.results[0]?.matchedStrategies.some((strategy) => strategy.includes("sanitized")));
+});
+
+test("browseCatalog returns ranked catalog and table candidates", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-catalog");
+
+  const result = await service.browseCatalog("고용 분야에서 볼 자료를 찾아줘", [], 5);
+
+  assert.ok(result.exploredViews.length >= 1);
+  assert.ok(result.results.some((entry) => entry.tblId === "DT_TEST_A"));
+  assert.ok(result.results.some((entry) => entry.listId === "L_EMP"));
+});
+
+test("browseCatalog explores deeper list levels for browse intent", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-catalog-deep");
+
+  const result = await service.browseCatalog("보건 분야에서 어떤 자료가 있는지 찾아줘", [], 5);
+
+  assert.ok(result.results.some((entry) => entry.depth === 2));
+  assert.ok(result.results.some((entry) => entry.tblId === "DT_HEALTH_A"));
 });
 
 test("getTableBundle combines preview, meta and explanation", async () => {
@@ -175,6 +492,555 @@ test("getTableBundle combines preview, meta and explanation", async () => {
   assert.equal(bundle.dataPreview.length, 1);
   assert.equal(bundle.explanation?.statsNm, "경제활동인구조사 A");
   assert.equal(bundle.previewGuide.dimensions.length, 2);
+  assert.equal(bundle.meta.weights.length, 1);
+  assert.equal(bundle.provenance.previewSource, "openapi");
+  assert.equal(bundle.provenance.explanationSource, "statId");
+  assert.equal(bundle.provenance.cacheStatus, "miss");
+  assert.ok(bundle.provenance.previewAttempts.length >= 1);
+  assert.equal(bundle.provenance.previewAttempts[0]?.provider, "statisticsData");
+  assert.ok(bundle.provenance.metaSources.some((entry) => entry.type === "WGT"));
+});
+
+class FailingSearchClient extends FakeClient {
+  override async searchStatistics(): Promise<JsonRecord[]> {
+    throw new KosisApiError("서버 오류", "50");
+  }
+}
+
+test("searchTopics falls back to stale cache when revalidation fails", async () => {
+  const cacheDir = "/tmp/kosis-question-mcp-test-search-stale";
+  const warmService = await createService(cacheDir, new FakeClient(), {
+    ttlMs: -1,
+  });
+  await warmService.searchTopics("고용 상황이 궁금해", [], 5);
+
+  const staleService = await createService(cacheDir, new FailingSearchClient(), {
+    clearCache: false,
+    ttlMs: -1,
+  });
+  const result = await staleService.searchTopics("고용 상황이 궁금해", [], 5);
+
+  assert.equal(result.cacheStatus, "expired-revalidate-failed-stale-used");
+  assert.ok(result.results.length >= 1);
+  assert.equal(result.attempts.at(-1)?.provider, "cache");
+  assert.equal(result.attempts.at(-1)?.outcome, "stale-ok");
+});
+
+class IndicatorIdListFallbackClient extends FakeClient {
+  override async searchIndicatorLists(params: {
+    indicatorId?: string;
+    indicatorName?: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorId) {
+      throw new KosisApiError("필수요청변수값이 누락되었습니다.", "20");
+    }
+    return [
+      {
+        statJipyoId: "1152",
+        statJipyoNm: "실업률",
+        unit: "%",
+        areaTypeName: "국가",
+        prdSeName: "년",
+        strtPrdDe: "1990",
+        endPrdDe: "2024",
+        prdDe: "2024년",
+      },
+    ];
+  }
+
+  override async getIndicatorExplanationById(): Promise<JsonRecord[]> {
+    throw new KosisApiError("데이터가 존재하지 않습니다.", "30");
+  }
+
+  override async getIndicatorExplanationByName(): Promise<JsonRecord[]> {
+    return [
+      {
+        statJipyoId: "1152",
+        statJipyoNm: "실업률",
+        jipyoExplan: "실업률 설명",
+        jipyoExplan1: "경제활동인구 대비 실업자 비율이다.",
+      },
+    ];
+  }
+
+  override async getIndicatorDetailById(): Promise<JsonRecord[]> {
+    return [
+      {
+        statJipyoId: "1152",
+        statJipyoNm: "실업률",
+        prdSe: "Y",
+        prdDe: "2015",
+        itmNm: "한국",
+        val: "3.6",
+      },
+      {
+        statJipyoId: "1152",
+        statJipyoNm: "실업률",
+        prdSe: "Y",
+        prdDe: "2024",
+        itmNm: "한국",
+        val: "2.8",
+      },
+    ];
+  }
+}
+
+test("getIndicatorBundle falls back from id list lookup to name lookup", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-indicator-id-list-fallback",
+    new IndicatorIdListFallbackClient(),
+  );
+
+  const bundle = await service.getIndicatorBundle({
+    indicatorId: "1152",
+    indicatorName: "실업률",
+    startPrdDe: "2015",
+    endPrdDe: "2024",
+    srvRn: 10,
+  });
+
+  assert.equal(bundle.indicator.indicatorId, "1152");
+  assert.equal(bundle.provenance.listSource, "indicatorName");
+  assert.equal(bundle.provenance.explanationSource, "indicatorName");
+  assert.equal(bundle.provenance.detailSource, "indicatorId");
+  assert.ok(
+    bundle.provenance.lookupAttempts.some(
+      (attempt) =>
+        attempt.provider === "indicatorListById" &&
+        attempt.outcome === "error" &&
+        attempt.errorClass === "fatal-request",
+    ),
+  );
+});
+
+test("getIndicatorBundle combines explanation, list context and detail rows", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-indicator-bundle");
+
+  const bundle = await service.getIndicatorBundle({
+    indicatorName: "실업률",
+    srvRn: 2,
+  });
+
+  assert.equal(bundle.indicator.indicatorId, "1002");
+  assert.equal(bundle.explanation?.jipyoExplan, "실업률 설명");
+  assert.equal(bundle.listMatches.length, 1);
+  assert.equal(bundle.detailRows.length, 2);
+  assert.equal(bundle.coverage.latest, "2024 연간");
+  assert.equal(bundle.provenance.explanationSource, "indicatorId");
+  assert.equal(bundle.provenance.detailSource, "indicatorId");
+});
+
+class AnnualIndicatorPreferenceClient extends FakeClient {
+  override async searchIndicatorLists(params: {
+    indicatorId?: string;
+    indicatorName?: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorId) {
+      const map: Record<string, JsonRecord> = {
+        "274": {
+          statJipyoId: "274",
+          statJipyoNm: "실업률(월, 여자, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        "275": {
+          statJipyoId: "275",
+          statJipyoNm: "실업률(월, 남자, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        "276": {
+          statJipyoId: "276",
+          statJipyoNm: "실업률(월, 계, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        "1152": {
+          statJipyoId: "1152",
+          statJipyoNm: "실업률",
+          unit: "%",
+          areaTypeName: "국가",
+          prdSeName: "년",
+          strtPrdDe: "1990",
+          endPrdDe: "2024",
+          prdDe: "2024년",
+        },
+      };
+      return map[params.indicatorId] ? [map[params.indicatorId]] : [];
+    }
+
+    if (params.indicatorName?.includes("실업률")) {
+      return [
+        {
+          statJipyoId: "274",
+          statJipyoNm: "실업률(월, 여자, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        {
+          statJipyoId: "275",
+          statJipyoNm: "실업률(월, 남자, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        {
+          statJipyoId: "276",
+          statJipyoNm: "실업률(월, 계, 시계열보정)",
+          unit: "%",
+          areaTypeName: "전국",
+          prdSeName: "월",
+          strtPrdDe: "199906",
+          endPrdDe: "202603",
+          prdDe: "2026년3월",
+        },
+        {
+          statJipyoId: "1152",
+          statJipyoNm: "실업률",
+          unit: "%",
+          areaTypeName: "국가",
+          prdSeName: "년",
+          strtPrdDe: "1990",
+          endPrdDe: "2024",
+          prdDe: "2024년",
+        },
+      ];
+    }
+    return [];
+  }
+
+  override async getIndicatorExplanationById(params: {
+    indicatorId: string;
+  }): Promise<JsonRecord[]> {
+    return [
+      {
+        statJipyoId: params.indicatorId,
+        statJipyoNm: params.indicatorId === "1152" ? "실업률" : "실업률(월, 계, 시계열보정)",
+        jipyoExplan: "실업률 설명",
+        jipyoExplan1: "경제활동인구 대비 실업자 비율이다.",
+      },
+    ];
+  }
+
+  override async getIndicatorExplanationByName(): Promise<JsonRecord[]> {
+    return [];
+  }
+
+  override async getIndicatorDetailById(params: {
+    indicatorId: string;
+  }): Promise<JsonRecord[]> {
+    if (params.indicatorId === "1152") {
+      return [
+        {
+          statJipyoId: "1152",
+          statJipyoNm: "실업률",
+          prdSe: "Y",
+          prdDe: "2015",
+          itmNm: "한국",
+          val: "3.6",
+        },
+        {
+          statJipyoId: "1152",
+          statJipyoNm: "실업률",
+          prdSe: "Y",
+          prdDe: "2024",
+          itmNm: "한국",
+          val: "2.8",
+        },
+      ];
+    }
+    return [
+      {
+        statJipyoId: params.indicatorId,
+        statJipyoNm: "실업률(월, 계, 시계열보정)",
+        prdSe: "M",
+        prdDe: "202603",
+        itmNm: "계",
+        val: "2.9",
+      },
+    ];
+  }
+
+  override async getIndicatorDetailByName(): Promise<JsonRecord[]> {
+    return [];
+  }
+}
+
+test("answerBundle prefers annual unemployment indicator for long-horizon change questions", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-annual-indicator-preference",
+    new AnnualIndicatorPreferenceClient(),
+  );
+
+  const answer = await service.answerBundle(
+    "지난 10년간 대한민국 실업률 증감비율을 구해줘",
+    { comparisonMode: "none" },
+  );
+
+  assert.equal(answer.selectedIndicators[0]?.indicatorId, "1152");
+  assert.equal(answer.selectedIndicators[0]?.indicatorName, "실업률");
+});
+
+class MarriageDivorceCompareClient extends FakeClient {
+  override async searchStatistics(): Promise<JsonRecord[]> {
+    return [
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_BROAD",
+        TBL_NM: "시군구/인구동태건수 및 동태율(출생,사망,혼인,이혼)",
+        STAT_ID: "STAT_MD",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 인구동태건수 및 동태율",
+        STRT_PRD_DE: "2000",
+        END_PRD_DE: "2024",
+        REC_TBL_SE: "Y",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_MARRIAGE",
+        TBL_NM: "혼인건수, 조혼인율",
+        STAT_ID: "STAT_MD",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 혼인",
+        STRT_PRD_DE: "1970",
+        END_PRD_DE: "2024",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_DIVORCE",
+        TBL_NM: "이혼건수, 조이혼율",
+        STAT_ID: "STAT_MD",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 이혼",
+        STRT_PRD_DE: "1970",
+        END_PRD_DE: "2024",
+      },
+    ];
+  }
+
+  override async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
+    if (params.type === "TBL") {
+      return [
+        {
+          TBL_NM:
+            params.tblId === "DT_MARRIAGE"
+              ? "혼인건수, 조혼인율"
+              : params.tblId === "DT_DIVORCE"
+                ? "이혼건수, 조이혼율"
+                : "시군구/인구동태건수 및 동태율(출생,사망,혼인,이혼)",
+        },
+      ];
+    }
+    if (params.type === "ITM") {
+      if (params.tblId === "DT_MARRIAGE") {
+        return [
+          { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+          { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "41", ITM_NM: "혼인건수(건)" },
+        ];
+      }
+      if (params.tblId === "DT_DIVORCE") {
+        return [
+          { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+          { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "51", ITM_NM: "이혼건수(건)" },
+        ];
+      }
+      return [
+        { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+        { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "41", ITM_NM: "혼인건수(건)" },
+        { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "51", ITM_NM: "이혼건수(건)" },
+      ];
+    }
+    if (params.type === "PRD") {
+      return [
+        { PRD_SE: "Y", PRD_DE: "2015" },
+        { PRD_SE: "Y", PRD_DE: "2024" },
+      ];
+    }
+    if (params.type === "SOURCE") {
+      return [{ JOSA_NM: "인구동향조사", STAT_ID: "STAT_MD" }];
+    }
+    if (params.type === "NCD") {
+      return [{ PRD_SE: "Y", PRD_DE: "2024", SEND_DE: "20250101" }];
+    }
+    return super.getMeta(params);
+  }
+
+  override async getStatisticsData(params: { tblId: string }): Promise<JsonRecord[]> {
+    if (params.tblId === "DT_MARRIAGE") {
+      return [{ TBL_NM: "혼인건수, 조혼인율", ITM_NM: "혼인건수(건)", PRD_DE: "2024", DT: "222412" }];
+    }
+    if (params.tblId === "DT_DIVORCE") {
+      return [{ TBL_NM: "이혼건수, 조이혼율", ITM_NM: "이혼건수(건)", PRD_DE: "2024", DT: "91151" }];
+    }
+    return [{ TBL_NM: "시군구/인구동태건수 및 동태율(출생,사망,혼인,이혼)", ITM_NM: "혼인건수(건)", PRD_DE: "2024", DT: "1" }];
+  }
+}
+
+test("answerBundle prefers marriage and divorce pair for compare questions", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-marriage-divorce-compare",
+    new MarriageDivorceCompareClient(),
+  );
+
+  const answer = await service.answerBundle(
+    "지난 10년간 이혼과 혼인 건수 비교표를 보여줘",
+    { comparisonMode: "auto" },
+  );
+
+  assert.ok(answer.comparison);
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_MARRIAGE"));
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_DIVORCE"));
+  assert.ok(!answer.selectedTables.every((table) => table.tblId === "DT_BROAD"));
+});
+
+class BirthDeathCompareClient extends FakeClient {
+  override async searchStatistics(): Promise<JsonRecord[]> {
+    return [
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_VITAL",
+        TBL_NM: "인구동태건수 및 동태율 추이(출생,사망,혼인,이혼)",
+        STAT_ID: "STAT_VITAL",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 인구동태건수 및 동태율",
+        STRT_PRD_DE: "1970",
+        END_PRD_DE: "2024",
+        REC_TBL_SE: "Y",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_BIRTH",
+        TBL_NM: "출생아수, 조출생률",
+        STAT_ID: "STAT_VITAL",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 출생",
+        STRT_PRD_DE: "1970",
+        END_PRD_DE: "2024",
+      },
+      {
+        ORG_ID: "101",
+        ORG_NM: "통계청",
+        TBL_ID: "DT_DEATH",
+        TBL_NM: "사망자수, 조사망률",
+        STAT_ID: "STAT_VITAL",
+        STAT_NM: "인구동향조사",
+        MT_ATITLE: "인구 > 인구동향조사 > 사망",
+        STRT_PRD_DE: "1970",
+        END_PRD_DE: "2024",
+      },
+    ];
+  }
+
+  override async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
+    if (params.type === "TBL") {
+      return [
+        {
+          TBL_NM:
+            params.tblId === "DT_BIRTH"
+              ? "출생아수, 조출생률"
+              : params.tblId === "DT_DEATH"
+                ? "사망자수, 조사망률"
+                : "인구동태건수 및 동태율 추이(출생,사망,혼인,이혼)",
+        },
+      ];
+    }
+    if (params.type === "ITM") {
+      if (params.tblId === "DT_BIRTH") {
+        return [
+          { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+          { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "11", ITM_NM: "출생아수(명)" },
+        ];
+      }
+      if (params.tblId === "DT_DEATH") {
+        return [
+          { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+          { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "21", ITM_NM: "사망자수(명)" },
+        ];
+      }
+      return [
+        { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "T1", ITM_NM: "인구동태건수 및 동태율 추이" },
+        { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "11", ITM_NM: "출생아수(명)" },
+        { OBJ_ID: "A", OBJ_NM: "기본항목별", OBJ_ID_SN: "1", ITM_ID: "21", ITM_NM: "사망자수(명)" },
+      ];
+    }
+    if (params.type === "PRD") {
+      return [
+        { PRD_SE: "Y", PRD_DE: "2015" },
+        { PRD_SE: "Y", PRD_DE: "2024" },
+      ];
+    }
+    if (params.type === "SOURCE") {
+      return [{ JOSA_NM: "인구동향조사", STAT_ID: "STAT_VITAL" }];
+    }
+    if (params.type === "NCD") {
+      return [{ PRD_SE: "Y", PRD_DE: "2024", SEND_DE: "20250101" }];
+    }
+    return super.getMeta(params);
+  }
+
+  override async getStatisticsData(params: { tblId: string }): Promise<JsonRecord[]> {
+    if (params.tblId === "DT_BIRTH") {
+      return [{ TBL_NM: "출생아수, 조출생률", ITM_NM: "출생아수(명)", PRD_DE: "2024", DT: "238300" }];
+    }
+    if (params.tblId === "DT_DEATH") {
+      return [{ TBL_NM: "사망자수, 조사망률", ITM_NM: "사망자수(명)", PRD_DE: "2024", DT: "358000" }];
+    }
+    return [{ TBL_NM: "인구동태건수 및 동태율 추이(출생,사망,혼인,이혼)", ITM_NM: "출생아수(명)", PRD_DE: "2024", DT: "1" }];
+  }
+}
+
+test("answerBundle generalizes compare pair selection beyond marriage and divorce", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-birth-death-compare",
+    new BirthDeathCompareClient(),
+  );
+
+  const answer = await service.answerBundle(
+    "지난 10년간 출생과 사망 건수 비교표를 보여줘",
+    { comparisonMode: "auto" },
+  );
+
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_BIRTH"));
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_DEATH"));
+});
+
+test("answerBundle handles compare phrasing with 대비", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-birth-death-compare-versus",
+    new BirthDeathCompareClient(),
+  );
+
+  const answer = await service.answerBundle(
+    "지난 10년간 출생아 수 대비 사망자 수 비교표를 보여줘",
+    { comparisonMode: "auto" },
+  );
+
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_BIRTH"));
+  assert.ok(answer.selectedTables.some((table) => table.tblId === "DT_DEATH"));
 });
 
 test("compareTables exposes shared dimensions and units", async () => {
@@ -188,6 +1054,12 @@ test("compareTables exposes shared dimensions and units", async () => {
   assert.ok(comparison.commonDimensions.includes("지역"));
   assert.ok(comparison.summary.comparable);
   assert.equal(comparison.tables.length, 2);
+  assert.ok(comparison.comparisonMatrix.length >= 1);
+  assert.ok(
+    Object.keys(comparison.comparisonMatrix[0] ?? {}).some((key) =>
+      key.includes("고용률"),
+    ),
+  );
 });
 
 test("getTableBundle supports explicit dimension selections for preview retries", async () => {
@@ -204,6 +1076,15 @@ test("getTableBundle supports explicit dimension selections for preview retries"
   assert.equal(bundle.dataPreview[0]?.C1_NM, "서울");
   assert.equal(bundle.previewRequest.itemId, "EMP");
   assert.equal(bundle.previewRequest.attempts[0]?.objL1, "SEOUL");
+});
+
+test("getTableBundle exposes actual fallback period code in previewRequest", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-fallback-prdse");
+
+  const bundle = await service.getTableBundle("101", "DT_TEST_A", "Y");
+
+  assert.equal(bundle.previewRequest.prdSe, "Y");
+  assert.equal(bundle.provenance.previewParameters.prdSe, "Y");
 });
 
 test("searchTopics normalizes Korean particles and still finds employment tables", async () => {
@@ -228,15 +1109,226 @@ test("buildQueryPlan strips temporal noise and adds card usage hints", () => {
   );
 });
 
+test("buildQueryPlan adds browse-oriented hints for browse questions", () => {
+  const intent = inferQuestionIntent("보건 분야에서 어떤 자료가 있는지 찾아줘");
+  const result = buildQueryPlan(
+    "보건 분야에서 어떤 자료가 있는지 찾아줘",
+    [],
+    intent,
+    "catalog",
+  );
+
+  assert.ok(result.queryPlan.some((item) => item.query === "보건 통계"));
+  assert.ok(result.queryPlan.some((item) => item.query === "보건 분야"));
+  assert.ok(result.queryPlan.some((item) => item.query === "보건 목록"));
+});
+
+test("buildQueryPlan adds explain-oriented hints for explain questions", () => {
+  const intent = inferQuestionIntent("실업률이 무엇인지 설명해줘");
+  const result = buildQueryPlan("실업률이 무엇인지 설명해줘", [], intent, "indicator");
+
+  assert.ok(result.queryPlan.some((item) => item.query === "실업률 설명"));
+  assert.ok(result.queryPlan.some((item) => item.query === "실업률 의미"));
+  assert.ok(result.queryPlan.some((item) => item.query === "실업률 설명자료"));
+});
+
+test("buildQueryPlan separates lane-specific hints", () => {
+  const intent = inferQuestionIntent("실업률이 무엇인지 설명해줘");
+  const tablePlan = buildQueryPlan("실업률이 무엇인지 설명해줘", [], intent, "table");
+  const indicatorPlan = buildQueryPlan(
+    "실업률이 무엇인지 설명해줘",
+    [],
+    intent,
+    "indicator",
+  );
+
+  assert.ok(tablePlan.queryPlan.some((item) => item.query === "실업률 통계표"));
+  assert.ok(!tablePlan.queryPlan.some((item) => item.query === "실업률 설명자료"));
+  assert.ok(indicatorPlan.queryPlan.some((item) => item.query === "실업률 설명자료"));
+});
+
+test("resolveDefaultPeriodCode honors preferred yearly period when available", () => {
+  const statInfo = {
+    defaultPeriodStr: "M",
+    periodInfo: {
+      defaultListM: ["2025.11", "2025.12", "2026.01"],
+      defaultListY: ["2016", "2017", "2018", "2019", "2020"],
+    },
+  };
+
+  const periodCode = resolveDefaultPeriodCode(statInfo, {
+    preferredPrdSe: "Y",
+    startPrdDe: "2016",
+    endPrdDe: "2020",
+  });
+
+  assert.equal(periodCode, "Y");
+});
+
+test("resolvePeriodList returns ranged yearly periods and prefers latest slice", () => {
+  const statInfo = {
+    periodInfo: {
+      defaultListY: [
+        "2010",
+        "2011",
+        "2012",
+        "2013",
+        "2014",
+        "2015",
+        "2016",
+        "2017",
+        "2018",
+        "2019",
+        "2020",
+        "2021",
+        "2022",
+        "2023",
+        "2024",
+        "2025",
+      ],
+    },
+  };
+
+  const periods = resolvePeriodList(statInfo, "Y", {
+    startPrdDe: "2016",
+    endPrdDe: "2025",
+    newEstPrdCnt: 10,
+  });
+
+  assert.deepEqual(periods, [
+    "2016",
+    "2017",
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "2025",
+  ]);
+});
+
+test("resolvePeriodList falls back to listY when defaultListY is empty", () => {
+  const statInfo = {
+    periodInfo: {
+      defaultListY: [],
+      listY: [
+        "2013",
+        "2014",
+        "2015",
+        "2016",
+        "2017",
+        "2018",
+        "2019",
+        "2020",
+        "2021",
+        "2022",
+        "2023",
+        "2024",
+        "2025",
+      ],
+    },
+  };
+
+  const periods = resolvePeriodList(statInfo, "Y", {
+    startPrdDe: "2016",
+    endPrdDe: "2025",
+    newEstPrdCnt: 10,
+  });
+
+  assert.deepEqual(periods, [
+    "2016",
+    "2017",
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "2025",
+  ]);
+});
+
+test("resolvePeriodList expands from listY when requested count exceeds default range", () => {
+  const statInfo = {
+    periodInfo: {
+      defaultListY: ["2025", "2024", "2023"],
+      listY: [
+        "2014",
+        "2015",
+        "2016",
+        "2017",
+        "2018",
+        "2019",
+        "2020",
+        "2021",
+        "2022",
+        "2023",
+        "2024",
+        "2025",
+      ],
+    },
+  };
+
+  const periods = resolvePeriodList(statInfo, "Y", {
+    endPrdDe: "2024",
+    newEstPrdCnt: 10,
+  });
+
+  assert.deepEqual(periods, [
+    "2015",
+    "2016",
+    "2017",
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+  ]);
+});
+
 test("inferQuestionIntent captures yearly unemployment trend intent", () => {
   const intent = inferQuestionIntent("지난 10년 동안 대한민국의 실업률 변화를 알려달라");
 
   assert.deepEqual(intent.keywords, ["대한민국", "실업률"]);
   assert.deepEqual(intent.measures, ["실업률"]);
+  assert.equal(intent.primaryIntent, "trend");
   assert.equal(intent.preferredPrdSe, "Y");
   assert.equal(intent.geographyScope, "national");
+  assert.equal(intent.wantsIndicators, true);
   assert.ok(intent.startPrdDe);
   assert.ok(intent.endPrdDe);
+});
+
+test("inferQuestionIntent marks browse questions as browse intent", () => {
+  const intent = inferQuestionIntent("보건 분야에서 어떤 자료가 있는지 찾아줘");
+
+  assert.equal(intent.primaryIntent, "browse");
+  assert.equal(intent.wantsIndicators, false);
+});
+
+test("inferQuestionIntent extracts generic comparison measures beyond hardcoded domains", () => {
+  const intent = inferQuestionIntent("지난 10년간 수출 금액과 수입 금액 비교표를 보여줘");
+
+  assert.equal(intent.primaryIntent, "compare");
+  assert.ok(intent.measures.some((measure) => measure.includes("수출 금액")));
+  assert.ok(intent.measures.some((measure) => measure.includes("수입 금액")));
+  assert.ok(intent.targets.some((target) => target.label.includes("수출 금액")));
+  assert.ok(intent.targets.some((target) => target.label.includes("수입 금액")));
+});
+
+test("inferQuestionIntent builds structured targets for complex compare questions", () => {
+  const intent = inferQuestionIntent("서울과 부산의 혼인 건수, 이혼 건수, 출생아 수를 같이 비교해줘");
+
+  assert.equal(intent.primaryIntent, "compare");
+  assert.ok(intent.targets.length >= 3);
+  assert.ok(intent.targets.some((target) => target.label.includes("혼인 건수")));
+  assert.ok(intent.targets.some((target) => target.label.includes("이혼 건수")));
+  assert.ok(intent.targets.some((target) => target.label.includes("출생아")));
 });
 
 test("scoreSearchRecord prefers direct credit card tables over tax deduction mentions", () => {
@@ -303,6 +1395,75 @@ test("answerBundle prioritizes unemployment table for unemployment question", as
   const answer = await service.answerBundle("대한민국 실업률 변화를 알려달라");
 
   assert.equal(answer.selectedTables[0]?.tblId, "DT_TEST_B");
+  assert.equal(answer.selectedIndicators[0]?.indicatorId, "1002");
+  assert.ok(answer.selectedIndicators[0]?.detailRows >= 1);
+  assert.ok(answer.provenance.lanes.some((lane) => lane.lane === "table-search"));
+  assert.ok(
+    answer.provenance.lanes.some(
+      (lane) =>
+        lane.lane === "indicator-search" &&
+        lane.attemptCount >= 1 &&
+        lane.topStrategies.length >= 1,
+    ),
+  );
+  assert.ok(answer.provenance.selectedTables.some((entry) => entry.weightRowCount >= 1));
+  assert.ok(
+    answer.provenance.selectedIndicators.some(
+      (entry) =>
+        entry.indicatorId === "1002" &&
+        entry.explanationSource === "indicatorId" &&
+        entry.matchedStrategies.length >= 1,
+    ),
+  );
+});
+
+test("answerBundle carries catalog suggestions for browse-style questions", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-answer-catalog");
+
+  const answer = await service.answerBundle("고용 분야에서 어떤 자료가 있는지 찾아줘");
+
+  assert.ok(answer.selectedCatalogs.length >= 1);
+  assert.ok(answer.selectedCatalogs.length >= answer.selectedIndicators.length);
+  assert.ok(answer.selectedCatalogs.some((entry) => entry.listName === "고용"));
+  assert.ok(answer.selectedTables.some((entry) => entry.tblId === "DT_TEST_A"));
+});
+
+test("answerBundle favors indicators over tables for explain questions", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-answer-explain");
+
+  const answer = await service.answerBundle("실업률이 무엇인지 설명해줘");
+
+  assert.ok(answer.selectedIndicators.length >= 1);
+  assert.ok(answer.selectedTables.length <= 1);
+  assert.equal(answer.selectedIndicators[0]?.indicatorId, "1002");
+  assert.ok(answer.summary.headline.includes("설명 자료"));
+  assert.ok(answer.summary.takeaway.includes("정의"));
+  assert.ok(answer.evidence.some((entry) => entry.includes("설명 후보")));
+  assert.ok(answer.nextQuestions.some((entry) => entry.includes("최근 수치")));
+});
+
+test("answerBundle can promote deep catalog tables for browse questions", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-answer-catalog-deep");
+
+  const answer = await service.answerBundle("보건 분야에서 어떤 자료가 있는지 찾아줘");
+
+  assert.ok(answer.selectedCatalogs.some((entry) => entry.depth === 2));
+  assert.ok(answer.selectedTables.some((entry) => entry.tblId === "DT_HEALTH_A"));
+  assert.ok(answer.summary.headline.includes("후속 탐색 후보"));
+  assert.ok(answer.summary.takeaway.includes("통계표"));
+  assert.ok(answer.evidence.some((entry) => entry.includes("카테고리")));
+  assert.ok(answer.nextQuestions.some((entry) => entry.includes("더 내려가")));
+});
+
+test("answerBundle tailors trend evidence and next questions", async () => {
+  const service = await createService("/tmp/kosis-question-mcp-test-answer-trend");
+
+  const answer = await service.answerBundle("대한민국 실업률 최근 추이를 보여줘");
+
+  assert.ok(answer.summary.headline.includes("수치/시계열 후보"));
+  assert.ok(answer.summary.takeaway.includes("최신 시점"));
+  assert.ok(answer.evidence.some((entry) => entry.includes("최신 시점")));
+  assert.ok(answer.nextQuestions.some((entry) => entry.includes("최근 3개 시점")));
 });
 
 class CountryDefaultClient extends FakeClient {

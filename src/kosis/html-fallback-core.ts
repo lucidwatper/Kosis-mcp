@@ -158,9 +158,58 @@ export function extractStatInfo(html: string): StatHtmlInfo {
   return JSON.parse(raw) as StatHtmlInfo;
 }
 
-export function resolveDefaultPeriodCode(statInfo: StatHtmlInfo): string {
+function availablePeriodCodes(statInfo: StatHtmlInfo): string[] {
+  return Object.keys(statInfo.periodInfo ?? {})
+    .map((key) => key.match(/^defaultList([A-Z])$/)?.[1])
+    .filter((value): value is string => Boolean(value));
+}
+
+function isWithinPeriodRange(
+  value: string,
+  startPrdDe?: string,
+  endPrdDe?: string,
+): boolean {
+  if (!startPrdDe && !endPrdDe) {
+    return true;
+  }
+
+  const normalized = value.replace(/[^\d]/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  const start = startPrdDe?.replace(/[^\d]/g, "");
+  const end = endPrdDe?.replace(/[^\d]/g, "");
+
+  if (start && normalized < start) {
+    return false;
+  }
+  if (end && normalized > end) {
+    return false;
+  }
+  return true;
+}
+
+export function resolveDefaultPeriodCode(
+  statInfo: StatHtmlInfo,
+  options?: PreviewRequestOptions,
+): string {
+  const available = availablePeriodCodes(statInfo);
+  const preferred = options?.preferredPrdSe?.toUpperCase();
+  if (preferred && available.includes(preferred)) {
+    return preferred;
+  }
+
   const period = statInfo.defaultPeriodStr?.split("#").find(Boolean);
-  return period ?? "M";
+  if (period && available.includes(period)) {
+    return period;
+  }
+
+  if (available.includes("Y") && (options?.startPrdDe || options?.endPrdDe)) {
+    return "Y";
+  }
+
+  return period ?? available[0] ?? "M";
 }
 
 export function resolvePeriodList(
@@ -168,14 +217,40 @@ export function resolvePeriodList(
   periodCode: string,
   options?: PreviewRequestOptions,
 ): string[] {
-  const key = `defaultList${periodCode}`;
-  const values = Array.isArray(statInfo.periodInfo?.[key])
-    ? (statInfo.periodInfo?.[key] as Array<string | number>)
+  const defaultKey = `defaultList${periodCode}`;
+  const listKey = `list${periodCode}`;
+  const defaultValues = Array.isArray(statInfo.periodInfo?.[defaultKey])
+    ? (statInfo.periodInfo?.[defaultKey] as Array<string | number>)
+    : [];
+  const listValues = Array.isArray(statInfo.periodInfo?.[listKey])
+    ? (statInfo.periodInfo?.[listKey] as Array<string | number>)
     : [];
 
-  const normalized = values.map((value) => String(value));
-  const count = options?.newEstPrdCnt ?? Math.min(5, normalized.length || 5);
-  return normalized.slice(0, count);
+  const normalizedDefault = defaultValues.map((value) => String(value));
+  const normalizedFull =
+    listValues.length > 0
+      ? listValues.map((value) => String(value))
+      : normalizedDefault;
+  const count = options?.newEstPrdCnt ?? Math.min(5, normalizedDefault.length || normalizedFull.length || 5);
+  const wantsExpandedRange =
+    Boolean(options?.startPrdDe || options?.endPrdDe) ||
+    (options?.newEstPrdCnt !== undefined &&
+      normalizedFull.length > normalizedDefault.length &&
+      options.newEstPrdCnt > normalizedDefault.length);
+
+  const filteredFull = normalizedFull.filter((value) =>
+    isWithinPeriodRange(value, options?.startPrdDe, options?.endPrdDe),
+  );
+  if (wantsExpandedRange && filteredFull.length > 0) {
+    return filteredFull.slice(-count);
+  }
+
+  const normalized = normalizedDefault.length > 0 ? normalizedDefault : normalizedFull;
+  const filtered = normalized.filter((value) =>
+    isWithinPeriodRange(value, options?.startPrdDe, options?.endPrdDe),
+  );
+  const source = filtered.length > 0 ? filtered : normalized;
+  return source.slice(-count);
 }
 
 export function resolveSelectedItems(

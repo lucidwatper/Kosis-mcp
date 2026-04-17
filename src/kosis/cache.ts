@@ -7,6 +7,11 @@ interface CacheEnvelope<T> {
   value: T;
 }
 
+export interface CacheReadResult<T> {
+  status: "fresh" | "stale" | "miss";
+  value: T | null;
+}
+
 export class FileCache {
   constructor(
     private readonly rootDir: string,
@@ -25,23 +30,37 @@ export class FileCache {
     return path.join(this.rootDir, namespace, `${digest}.json`);
   }
 
-  async get<T>(namespace: string, key: string): Promise<T | null> {
+  async getWithStatus<T>(namespace: string, key: string): Promise<CacheReadResult<T>> {
     const cachePath = this.buildPath(namespace, key);
 
     try {
       const raw = await fs.readFile(cachePath, "utf8");
       const parsed = JSON.parse(raw) as CacheEnvelope<T>;
 
-      if (!parsed || typeof parsed !== "object" || parsed.expiresAt < Date.now()) {
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        typeof parsed.expiresAt !== "number" ||
+        !("value" in parsed)
+      ) {
         await fs.rm(cachePath, { force: true });
-        return null;
+        return { status: "miss", value: null };
       }
 
-      return parsed.value;
+      if (parsed.expiresAt < Date.now()) {
+        return { status: "stale", value: parsed.value };
+      }
+
+      return { status: "fresh", value: parsed.value };
     } catch (error) {
       await fs.rm(cachePath, { force: true }).catch(() => undefined);
-      return null;
+      return { status: "miss", value: null };
     }
+  }
+
+  async get<T>(namespace: string, key: string): Promise<T | null> {
+    const result = await this.getWithStatus<T>(namespace, key);
+    return result.status === "fresh" ? result.value : null;
   }
 
   async set<T>(namespace: string, key: string, value: T): Promise<void> {
