@@ -17,6 +17,34 @@ import {
 import { inferQuestionIntent } from "./intent.js";
 
 export type QueryPlanLane = "table" | "indicator" | "catalog";
+const LOW_SIGNAL_QUERY_TERMS = new Set([
+  "대한민국",
+  "한국",
+  "국내",
+  "전국",
+  "최근",
+  "지난",
+  "변화",
+  "변화율",
+  "증감",
+  "증감률",
+  "추이",
+  "설명",
+  "의미",
+  "수치",
+  "값",
+  "자료",
+  "통계",
+  "통계표",
+  "통계자료",
+  "지표",
+  "비교",
+]);
+const SEX_SLOT_TERMS = ["성별", "남녀", "남성", "여성", "남자", "여자"];
+const REGION_SLOT_TERMS = ["대한민국", "한국", "전국", "지역", "시도", "행정구역", "국가"];
+const AGE_SLOT_TERMS = ["연령", "연령별", "청년", "고령", "노년", "15~24", "15~29", "60세", "65세"];
+const GAP_SLOT_TERMS = ["격차", "차이", "gap"];
+const TREND_SLOT_TERMS = ["추이", "변화", "시계열", "증감", "변화율", "증감률"];
 
 function queryPairs(tokens: string[]): string[] {
   const pairs: string[] = [];
@@ -157,6 +185,91 @@ function inferIntentHints(
   return hints;
 }
 
+function comparisonSeed(intent: QueryIntent): string | null {
+  if (intent.comparisonAxes.includes("sex")) {
+    return intent.keywords.includes("남녀") ? "남녀" : "성별";
+  }
+  if (intent.comparisonAxes.includes("age")) {
+    return "연령별";
+  }
+  if (intent.comparisonAxes.includes("region")) {
+    return intent.geographyScope === "global" ? "국가별" : "지역별";
+  }
+  return null;
+}
+
+function primaryOperationSeed(intent: QueryIntent): string | null {
+  if (intent.operationTerms.some((term) => GAP_SLOT_TERMS.includes(term))) {
+    return "격차";
+  }
+  if (intent.operationTerms.includes("변화율") || intent.operationTerms.includes("증감률")) {
+    return "변화율";
+  }
+  if (intent.requiresTimeSeries) {
+    return "추이";
+  }
+  if (intent.primaryIntent === "explain") {
+    return "설명";
+  }
+  if (intent.primaryIntent === "compare") {
+    return "비교";
+  }
+  return null;
+}
+
+function buildStructuredQueries(intent: QueryIntent, lane: QueryPlanLane): string[] {
+  const measure =
+    intent.measures[0] ??
+    intent.focusTerms.find(
+      (term) =>
+        !intent.operationTerms.includes(term) &&
+        !["남녀", "성별", "연령별", "지역별", "국가별"].includes(term),
+    ) ??
+    intent.focusTerms[0];
+  const comparison = comparisonSeed(intent);
+  const operation = primaryOperationSeed(intent);
+  const focusBlock = intent.focusTerms.slice(0, 3).join(" ");
+
+  return uniqueStrings([
+    [comparison, measure, operation].filter(Boolean).join(" "),
+    [comparison, measure].filter(Boolean).join(" "),
+    [measure, operation].filter(Boolean).join(" "),
+    focusBlock,
+    lane === "indicator" && measure ? `${measure} 지표` : "",
+    lane === "table" && measure ? `${measure} 통계표` : "",
+    lane === "catalog" && measure ? `${measure} 자료` : "",
+  ]).filter(Boolean);
+}
+
+function meaningfulTokenCount(query: string): number {
+  return tokenizeQuestion(query).filter((token) => !LOW_SIGNAL_QUERY_TERMS.has(token)).length;
+}
+
+function isUsefulQuery(query: string, lane: QueryPlanLane, intent: QueryIntent): boolean {
+  const tokens = tokenizeQuestion(query);
+  if (tokens.length === 0 || query.trim().length < 2) {
+    return false;
+  }
+
+  const usefulCount = meaningfulTokenCount(query);
+  if (tokens.length === 1) {
+    if (intent.measures.includes(tokens[0])) {
+      return true;
+    }
+    return usefulCount > 0 && !LOW_SIGNAL_QUERY_TERMS.has(tokens[0]);
+  }
+
+  if (usefulCount === 0) {
+    return false;
+  }
+
+  if (lane === "indicator" && usefulCount === 1 && intent.primaryIntent !== "explain") {
+    return intent.measures.includes(tokens.find((token) => !LOW_SIGNAL_QUERY_TERMS.has(token)) ?? "");
+  }
+
+  return true;
+}
+
 function laneSpecificHints(
   question: string,
   tokens: string[],
@@ -218,11 +331,13 @@ export function buildQueryPlan(
 ): { keywords: string[]; queryPlan: QueryPlanItem[] } {
   const keywords = tokenizeQuestion(question);
   const seedQueries = laneSeedQueries(question, keywords, lane);
+  const structuredQueries = buildStructuredQueries(intent, lane);
   const intentHints = inferIntentHints(question, keywords, intent, lane);
   const laneHints = laneSpecificHints(question, keywords, intent, lane);
   const pairQueries =
     lane === "catalog" ? queryPairs(keywords).slice(0, 1) : queryPairs(keywords).slice(0, 2);
   const generated = uniqueStrings([
+    ...structuredQueries,
     ...seedQueries,
     ...(lane === "catalog" ? [] : inferDomainHints(keywords)),
     ...intentHints,
@@ -230,12 +345,14 @@ export function buildQueryPlan(
     ...pairQueries,
     ...searchHints,
     ...(!isNaturalSentence(question) ? [question.trim()] : []),
-  ]).filter(Boolean);
+  ]).filter((query) => isUsefulQuery(query, lane, intent));
 
   const queryPlan = generated.map((query, index) => ({
     query,
     reason:
-      seedQueries.includes(query)
+      structuredQueries.includes(query)
+        ? "질문 구조화"
+        : seedQueries.includes(query)
         ? "핵심 키워드 압축"
         : intentHints.includes(query)
           ? "질문 유형 보정"
@@ -340,29 +457,107 @@ function resultWhyMatched(
   return reasons;
 }
 
+function slotCoverageReasons(intent: QueryIntent, haystack: string, hasPeriodRange: boolean): string[] {
+  const reasons: string[] = [];
+  if (
+    intent.comparisonAxes.includes("sex") &&
+    SEX_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase()))
+  ) {
+    reasons.push("성별 비교 축이 제목/설명에 드러남");
+  }
+  if (
+    intent.comparisonAxes.includes("region") &&
+    REGION_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase()))
+  ) {
+    reasons.push("지역/국가 축이 제목/설명에 드러남");
+  }
+  if (
+    intent.comparisonAxes.includes("age") &&
+    AGE_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase()))
+  ) {
+    reasons.push("연령 축이 제목/설명에 드러남");
+  }
+  if (
+    intent.operationTerms.some((term) => GAP_SLOT_TERMS.includes(term)) &&
+    GAP_SLOT_TERMS.some((term) => haystack.includes(term))
+  ) {
+    reasons.push("격차/차이 연산과 직접 맞닿은 표입니다.");
+  }
+  if (
+    intent.requiresTimeSeries &&
+    (hasPeriodRange || TREND_SLOT_TERMS.some((term) => haystack.includes(term)))
+  ) {
+    reasons.push("시계열 해석에 필요한 기간 정보가 있습니다.");
+  }
+  return reasons;
+}
+
+function computeIntentSlotScore(
+  intent: QueryIntent,
+  haystack: string,
+  hasPeriodRange: boolean,
+): { score: number; reasons: string[] } {
+  let score = 0;
+  const reasons = slotCoverageReasons(intent, haystack, hasPeriodRange);
+  const matchedFocusTerms = intent.focusTerms.filter((term) => haystack.includes(term.toLowerCase()));
+  const missingFocusTerms = intent.focusTerms.filter((term) => !haystack.includes(term.toLowerCase()));
+
+  score += matchedFocusTerms.length * 10;
+  score -= Math.min(missingFocusTerms.length, 3) * 4;
+
+  if (intent.comparisonAxes.includes("sex")) {
+    score += SEX_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase())) ? 28 : -24;
+  }
+  if (intent.comparisonAxes.includes("region")) {
+    score += REGION_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase())) ? 14 : -10;
+  }
+  if (intent.comparisonAxes.includes("age")) {
+    score += AGE_SLOT_TERMS.some((term) => haystack.includes(term.toLowerCase())) ? 14 : -10;
+  }
+  if (intent.operationTerms.some((term) => GAP_SLOT_TERMS.includes(term))) {
+    score += GAP_SLOT_TERMS.some((term) => haystack.includes(term)) ? 22 : -16;
+  }
+  if (intent.requiresTimeSeries) {
+    score += hasPeriodRange || TREND_SLOT_TERMS.some((term) => haystack.includes(term)) ? 14 : -10;
+  }
+  if (intent.geographyScope === "national") {
+    score += ["대한민국", "한국", "전국"].some((term) => haystack.includes(term.toLowerCase()))
+      ? 18
+      : -12;
+  }
+
+  return { score, reasons };
+}
+
 export function scoreSearchRecord(
   tokens: string[],
   query: string,
   queryIndex: number,
   rankIndex: number,
   record: JsonRecord,
+  intent = inferQuestionIntent(tokens.join(" ")),
 ): { score: number; whyMatched: string[] } {
   const haystack = textFromRecord(record);
   const overlap = overlapCount(tokens, haystack);
+  const title = `${readString(record, "TBL_NM") ?? ""} ${readString(record, "STAT_NM") ?? ""}`.toLowerCase();
+  const hasPeriodRange = Boolean(readString(record, "STRT_PRD_DE") || readString(record, "END_PRD_DE"));
+  const slotScore = computeIntentSlotScore(intent, haystack, hasPeriodRange);
 
   let score = 100 - queryIndex * 10 - rankIndex * 4;
   score += overlap * 6;
   score += boostFromRecommendation(record);
   score += computeDomainScore(tokens, record);
-
-  const title = `${readString(record, "TBL_NM") ?? ""} ${readString(record, "STAT_NM") ?? ""}`.toLowerCase();
+  score += slotScore.score;
   if (query && title.includes(query.toLowerCase())) {
     score += 8;
   }
 
   return {
     score,
-    whyMatched: resultWhyMatched(tokens, query, record, overlap, queryIndex),
+    whyMatched: uniqueStrings([
+      ...resultWhyMatched(tokens, query, record, overlap, queryIndex),
+      ...slotScore.reasons,
+    ]),
   };
 }
 
@@ -436,12 +631,14 @@ export function scoreIndicatorRecord(
   queryIndex: number,
   rankIndex: number,
   record: JsonRecord,
+  intent = inferQuestionIntent(tokens.join(" ")),
 ): { score: number; whyMatched: string[] } {
   const haystack = textFromRecord(record);
   const overlap = overlapCount(tokens, haystack);
   const indicatorName = (readString(record, "statJipyoNm") ?? "").toLowerCase();
   const prdSeName = (readString(record, "prdSeName") ?? "").toLowerCase();
   const areaTypeName = (readString(record, "areaTypeName") ?? "").toLowerCase();
+  const slotScore = computeIntentSlotScore(intent, haystack, Boolean(prdSeName));
   const wantsAnnual = tokens.some(
     (token) =>
       token.includes("년") ||
@@ -461,6 +658,7 @@ export function scoreIndicatorRecord(
 
   let score = 92 - queryIndex * 10 - rankIndex * 3;
   score += overlap * 8;
+  score += slotScore.score;
 
   const name = `${readString(record, "statJipyoNm") ?? ""} ${readString(record, "jipyoExplan") ?? ""}`.toLowerCase();
   if (query && name.includes(query.toLowerCase())) {
@@ -498,7 +696,10 @@ export function scoreIndicatorRecord(
 
   return {
     score,
-    whyMatched: resultWhyMatchedIndicator(query, record, overlap, queryIndex),
+    whyMatched: uniqueStrings([
+      ...resultWhyMatchedIndicator(query, record, overlap, queryIndex),
+      ...slotScore.reasons,
+    ]),
   };
 }
 

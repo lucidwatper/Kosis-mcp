@@ -1344,6 +1344,15 @@ function computeTableSelectionPolicyBonus(
   let bonus = 0;
   const title = bundle.table.title;
   const context = tableContextText(result, bundle);
+  const hasNationalDirectness = ["대한민국", "한국", "전국"].some((term) =>
+    context.includes(term.toLowerCase()),
+  );
+  const hasSexAxis = ["성별", "남녀", "남성", "여성", "남자", "여자"].some((term) =>
+    context.includes(term.toLowerCase()),
+  );
+  const hasGapLanguage = ["격차", "차이", "gap"].some((term) =>
+    context.includes(term.toLowerCase()),
+  );
 
   if (intent.primaryIntent === "browse") {
     if (String(result.raw.__sourceLane ?? "") === "catalog") {
@@ -1362,6 +1371,16 @@ function computeTableSelectionPolicyBonus(
     if (bundle.dataPreview.length > 0) {
       bonus += 6;
     }
+  }
+
+  if (intent.geographyScope === "national") {
+    bonus += hasNationalDirectness ? 24 : -18;
+  }
+  if (intent.comparisonAxes.includes("sex")) {
+    bonus += hasSexAxis ? 16 : -14;
+  }
+  if (intent.operationTerms.some((term) => ["격차", "차이"].includes(term))) {
+    bonus += hasGapLanguage ? 18 : -12;
   }
 
   if (intent.primaryIntent === "compare") {
@@ -2488,6 +2507,7 @@ export class KosisService {
                 queryIndex,
                 rankIndex,
                 record,
+                intent,
               );
               const normalized = normalizeSearchRecord(record, score, whyMatched);
               if (!normalized) {
@@ -2595,13 +2615,14 @@ export class KosisService {
               discoveredIds.add(indicatorId);
             }
 
-            const { score, whyMatched } = scoreIndicatorRecord(
-              keywords,
-              query,
-              queryIndex,
-              rankIndex,
-              record,
-            );
+              const { score, whyMatched } = scoreIndicatorRecord(
+                keywords,
+                query,
+                queryIndex,
+                rankIndex,
+                record,
+                intent,
+              );
             const normalized = normalizeIndicatorRecord(
               record,
               score + baseBonus,
@@ -3646,8 +3667,11 @@ export class KosisService {
       ...intent.searchHints,
       ...compareSearchHints(intent),
     ]);
-    const shouldSearchIndicators =
-      intent.wantsIndicators || intent.wantsExplanation || intent.measures.length > 0;
+    const tableStructuredQuestion =
+      intent.comparison ||
+      intent.comparisonAxes.length > 0 ||
+      intent.operationTerms.some((term) => ["격차", "차이"].includes(term));
+    const shouldSearchIndicators = intent.wantsIndicators || (!tableStructuredQuestion && intent.wantsExplanation);
     const shouldBrowse = wantsCatalogBrowse(question, intent);
     const compareQueries = compareTopicQueries(intent);
     const [search, indicatorSearch, catalogSearch, compareSearches] = await Promise.all([

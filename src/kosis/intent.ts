@@ -52,6 +52,32 @@ const REGION_TERMS = [
 
 const SEX_TERMS = ["남자", "여자", "남성", "여성", "남녀", "계", "전체"];
 const AGE_TERMS = ["청년", "청년층", "고령", "고령층", "노년", "15~24", "15~29", "60세", "65세"];
+const COMPARISON_REGION_TERMS = ["지역별", "시도별", "국가별", "도시별"];
+const QUERY_NOISE_TERMS = [
+  "지난",
+  "최근",
+  "동안",
+  "어떻게",
+  "보여줘",
+  "알려줘",
+  "찾아줘",
+  "해줘",
+  "자료",
+  "통계",
+  "통계표",
+  "통계자료",
+  "정도",
+  "되는지",
+  "어떤",
+  "무엇",
+  "설명",
+  "의미",
+];
+const EXPLICIT_INDICATOR_TERMS = ["지표", "지수", "설명", "의미"];
+const TIME_SERIES_TERMS = ["추이", "변화", "변화율", "증감", "증감률", "시계열", "최근"];
+const GAP_TERMS = ["격차", "차이"];
+const RATE_TERMS = ["변화율", "증감률", "비율"];
+const OPERATION_NOISE_TERMS = new Set([...TIME_SERIES_TERMS, ...GAP_TERMS, ...RATE_TERMS, "비교", "대비"]);
 
 const MEASURE_RULES: MeasureRule[] = [
   {
@@ -135,6 +161,10 @@ function resolvePeriodIntent(
   return {};
 }
 
+function containsAny(question: string, terms: string[]): boolean {
+  return terms.some((term) => question.includes(term));
+}
+
 function extractMeasures(question: string, keywords: string[]): MeasureRule[] {
   const ruleMeasures = MEASURE_RULES.filter((rule) =>
     rule.patterns.some(
@@ -174,6 +204,7 @@ function extractMeasures(question: string, keywords: string[]): MeasureRule[] {
   const genericMeasures = genericMeasureStrings
     .filter(
       (candidate) =>
+        !OPERATION_NOISE_TERMS.has(candidate) &&
         !ruleMeasures.some((rule) => rule.canonical === candidate) &&
         candidate.length >= 2,
     )
@@ -184,6 +215,99 @@ function extractMeasures(question: string, keywords: string[]): MeasureRule[] {
     }));
 
   return [...ruleMeasures, ...genericMeasures];
+}
+
+function extractFocusTerms(
+  question: string,
+  keywords: string[],
+  measures: string[],
+): string[] {
+  const focusTerms = uniqueStrings([
+    ...measures,
+    ...keywords,
+  ]).filter((term) => {
+    if (term.length < 2) {
+      return false;
+    }
+    if (QUERY_NOISE_TERMS.includes(term)) {
+      return false;
+    }
+    if (["대한민국", "한국", "국내", "전국"].includes(term)) {
+      return false;
+    }
+    return true;
+  });
+
+  if (containsAny(question, ["남녀", "성별"])) {
+    focusTerms.unshift(question.includes("성별") ? "성별" : "남녀");
+  }
+
+  if (containsAny(question, GAP_TERMS)) {
+    focusTerms.push(question.includes("격차") ? "격차" : "차이");
+  }
+
+  if (containsAny(question, RATE_TERMS)) {
+    focusTerms.push(
+      question.includes("변화율")
+        ? "변화율"
+        : question.includes("증감률")
+          ? "증감률"
+          : "비율",
+    );
+  }
+
+  return uniqueStrings(focusTerms);
+}
+
+function extractComparisonAxes(
+  question: string,
+  keywords: string[],
+): QueryIntent["comparisonAxes"] {
+  const axes: QueryIntent["comparisonAxes"] = [];
+
+  if (containsAny(question, [...SEX_TERMS, "성별"])) {
+    axes.push("sex");
+  }
+  if (containsAny(question, AGE_TERMS)) {
+    axes.push("age");
+  }
+  if (
+    containsAny(question, [...COMPARISON_REGION_TERMS, "지역", "시도", "행정구역"]) ||
+    question.includes("국가별") ||
+    question.includes("지역별")
+  ) {
+    axes.push("region");
+  }
+
+  return uniqueStrings(axes) as QueryIntent["comparisonAxes"];
+}
+
+function extractOperationTerms(question: string): string[] {
+  const operations: string[] = [];
+
+  if (containsAny(question, GAP_TERMS)) {
+    operations.push(question.includes("격차") ? "격차" : "차이");
+  }
+  if (containsAny(question, RATE_TERMS)) {
+    operations.push(
+      question.includes("변화율")
+        ? "변화율"
+        : question.includes("증감률")
+          ? "증감률"
+          : "비율",
+    );
+  }
+  if (containsAny(question, ["추이", "시계열"])) {
+    operations.push(question.includes("시계열") ? "시계열" : "추이");
+  }
+  if (containsAny(question, ["변화", "증감"])) {
+    operations.push(question.includes("증감") ? "증감" : "변화");
+  }
+  if (containsAny(question, ["비교", "대비"])) {
+    operations.push(question.includes("대비") ? "대비" : "비교");
+  }
+
+  return uniqueStrings(operations);
 }
 
 function extractIntentTargets(
@@ -337,6 +461,18 @@ export function inferQuestionIntent(
   const measureRules = extractMeasures(lowered, keywords);
   const periodIntent = resolvePeriodIntent(question, now);
   const primaryIntent = resolvePrimaryIntent(question, measureRules.length);
+  const measures = uniqueStrings(measureRules.map((rule) => rule.canonical));
+  const comparisonAxes = extractComparisonAxes(question, keywords);
+  const operationTerms = extractOperationTerms(question);
+  const focusTerms = extractFocusTerms(question, keywords, measures);
+  const explicitIndicatorRequest =
+    containsAny(question, EXPLICIT_INDICATOR_TERMS) ||
+    keywords.some((keyword) => EXPLICIT_INDICATOR_TERMS.includes(keyword));
+  const rateLikeMeasure = measures.some((measure) => /(률|율|지수|지표)$/.test(measure));
+  const requiresTimeSeries =
+    primaryIntent === "trend" ||
+    Boolean(periodIntent.startPrdDe || periodIntent.endPrdDe || periodIntent.recentPeriods) ||
+    operationTerms.some((term) => TIME_SERIES_TERMS.includes(term));
 
   const searchHints = uniqueStrings(
     measureRules.flatMap((rule) => rule.searchHints),
@@ -367,9 +503,12 @@ export function inferQuestionIntent(
   return {
     question,
     keywords,
-    measures: uniqueStrings(measureRules.map((rule) => rule.canonical)),
+    measures,
+    focusTerms,
     searchHints,
-    targets: extractIntentTargets(question, keywords, uniqueStrings(measureRules.map((rule) => rule.canonical))),
+    targets: extractIntentTargets(question, keywords, measures),
+    comparisonAxes,
+    operationTerms,
     primaryIntent,
     preferredPrdSe: periodIntent.preferredPrdSe,
     startPrdDe: periodIntent.startPrdDe,
@@ -388,13 +527,8 @@ export function inferQuestionIntent(
       question.includes("설명"),
     wantsIndicators:
       primaryIntent === "explain" ||
-      primaryIntent === "trend" ||
-      primaryIntent === "value" ||
-      question.includes("지표") ||
-      question.includes("지수") ||
-      question.includes("률") ||
-      question.includes("추이") ||
-      question.includes("최근") ||
-      measureRules.length > 0,
+      explicitIndicatorRequest ||
+      rateLikeMeasure,
+    requiresTimeSeries,
   };
 }

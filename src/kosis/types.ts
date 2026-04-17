@@ -122,8 +122,11 @@ export interface QueryIntent {
   question: string;
   keywords: string[];
   measures: string[];
+  focusTerms: string[];
   searchHints: string[];
   targets: IntentTarget[];
+  comparisonAxes: Array<"sex" | "age" | "region">;
+  operationTerms: string[];
   primaryIntent:
     | "search"
     | "browse"
@@ -141,6 +144,7 @@ export interface QueryIntent {
   comparison: boolean;
   wantsExplanation: boolean;
   wantsIndicators: boolean;
+  requiresTimeSeries: boolean;
 }
 
 export interface TableIdentity {

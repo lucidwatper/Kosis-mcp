@@ -1109,6 +1109,21 @@ test("buildQueryPlan strips temporal noise and adds card usage hints", () => {
   );
 });
 
+test("buildQueryPlan prefers structured queries over low-signal singleton hints", () => {
+  const intent = inferQuestionIntent("지난 10년간 한국의 남녀 임금 격차 변화율을 보여줘");
+  const result = buildQueryPlan(
+    "지난 10년간 한국의 남녀 임금 격차 변화율을 보여줘",
+    [],
+    intent,
+    "table",
+  );
+
+  assert.ok(result.queryPlan.some((item) => item.query === "남녀 임금 격차"));
+  assert.ok(result.queryPlan.some((item) => item.reason === "질문 구조화"));
+  assert.ok(!result.queryPlan.some((item) => item.query === "한국"));
+  assert.ok(!result.queryPlan.some((item) => item.query === "변화율"));
+});
+
 test("buildQueryPlan adds browse-oriented hints for browse questions", () => {
   const intent = inferQuestionIntent("보건 분야에서 어떤 자료가 있는지 찾아줘");
   const result = buildQueryPlan(
@@ -1300,6 +1315,9 @@ test("inferQuestionIntent captures yearly unemployment trend intent", () => {
   assert.equal(intent.preferredPrdSe, "Y");
   assert.equal(intent.geographyScope, "national");
   assert.equal(intent.wantsIndicators, true);
+  assert.equal(intent.requiresTimeSeries, true);
+  assert.ok(intent.focusTerms.includes("실업률"));
+  assert.ok(intent.operationTerms.includes("변화"));
   assert.ok(intent.startPrdDe);
   assert.ok(intent.endPrdDe);
 });
@@ -1331,8 +1349,22 @@ test("inferQuestionIntent builds structured targets for complex compare question
   assert.ok(intent.targets.some((target) => target.label.includes("출생아")));
 });
 
+test("inferQuestionIntent extracts generic comparison and operation slots", () => {
+  const intent = inferQuestionIntent("지난 10년간 한국의 남녀 임금 격차 변화율을 보여줘");
+
+  assert.ok(intent.focusTerms.includes("남녀"));
+  assert.ok(intent.focusTerms.includes("임금"));
+  assert.ok(intent.focusTerms.includes("격차"));
+  assert.ok(intent.comparisonAxes.includes("sex"));
+  assert.ok(intent.operationTerms.includes("격차"));
+  assert.ok(intent.operationTerms.includes("변화율"));
+  assert.equal(intent.requiresTimeSeries, true);
+  assert.equal(intent.wantsIndicators, false);
+});
+
 test("scoreSearchRecord prefers direct credit card tables over tax deduction mentions", () => {
   const tokens = ["대한민국", "신용카드", "사용", "건수", "금액"];
+  const intent = inferQuestionIntent("대한민국 지난 10년동안의 신용카드 사용 건수와 금액이 어떻게 변했는지 비교분석해줘");
 
   const direct = scoreSearchRecord(
     tokens,
@@ -1349,6 +1381,7 @@ test("scoreSearchRecord prefers direct credit card tables over tax deduction men
       STRT_PRD_DE: "1997",
       END_PRD_DE: "2026",
     },
+    intent,
   );
 
   const distractor = scoreSearchRecord(
@@ -1366,6 +1399,51 @@ test("scoreSearchRecord prefers direct credit card tables over tax deduction men
       STRT_PRD_DE: "2007",
       END_PRD_DE: "2021",
     },
+    intent,
+  );
+
+  assert.ok(direct.score > distractor.score);
+});
+
+test("scoreSearchRecord rewards slot-aligned wage gap tables over generic matches", () => {
+  const question = "지난 10년간 한국의 남녀 임금 격차 변화율을 보여줘";
+  const intent = inferQuestionIntent(question);
+  const tokens = intent.keywords;
+
+  const direct = scoreSearchRecord(
+    tokens,
+    "남녀 임금 격차",
+    0,
+    0,
+    {
+      ORG_ID: "101",
+      TBL_ID: "DT_OECD_WAGE_GAP",
+      TBL_NM: "성별 임금 격차",
+      STAT_NM: "OECD",
+      MT_ATITLE: "고용통계 > 보상, 소득 및 급여",
+      CONTENTS: "국가 집계 연산 성별 임금 격차 대한민국",
+      STRT_PRD_DE: "1970",
+      END_PRD_DE: "2023",
+    },
+    intent,
+  );
+
+  const distractor = scoreSearchRecord(
+    tokens,
+    "한국 남녀 임금",
+    0,
+    0,
+    {
+      ORG_ID: "101",
+      TBL_ID: "DT_INT_MARRIAGE",
+      TBL_NM: "국제결혼건수(한국인남편, 외국인아내)",
+      STAT_NM: "인구동향조사",
+      MT_ATITLE: "인구 > 혼인",
+      CONTENTS: "대한민국 한국인남편 외국인아내 건수",
+      STRT_PRD_DE: "2000",
+      END_PRD_DE: "2025",
+    },
+    intent,
   );
 
   assert.ok(direct.score > distractor.score);
