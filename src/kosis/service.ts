@@ -111,6 +111,18 @@ const DEFAULT_CATALOG_VIEWS: CatalogView[] = [
   { vwCd: "MT_GTITLE01", name: "e-지방지표", parentListId: "A" },
   { vwCd: "MT_ETITLE", name: "영문 KOSIS", parentListId: "A" },
 ];
+const TABLE_ATTEMPT_LIMIT = 14;
+const TABLE_RESULT_TARGET = 6;
+const TABLE_SEARCH_BUDGET_MS = 8_000;
+const CATALOG_ATTEMPT_LIMIT = 24;
+const CATALOG_RESULT_TARGET = 6;
+const CATALOG_SEARCH_BUDGET_MS = 10_000;
+const INDICATOR_EXACT_QUERY_LIMIT = 5;
+const INDICATOR_SANITIZED_QUERY_LIMIT = 4;
+const INDICATOR_DISCOVERED_ID_LIMIT = 4;
+const INDICATOR_ATTEMPT_LIMIT = 36;
+const INDICATOR_RESULT_TARGET = 4;
+const INDICATOR_SEARCH_BUDGET_MS = 18_000;
 
 function mapPeriodCode(raw?: string): string {
   if (!raw) {
@@ -1104,6 +1116,40 @@ function shouldUseStaleBecauseOutputIsNotUsable(
   return hadServerishError && !hadOkAttempt;
 }
 
+function appendBudgetStopNote<T extends ProviderAttemptLog>(
+  attempts: T[],
+  input: {
+    provider: string;
+    strategy: string;
+    note: string;
+    query?: string;
+    itemId?: string;
+    prdSe?: string;
+    attemptIndex?: number;
+    parentListId?: string;
+    depth?: number;
+  },
+): void {
+  const common = {
+    provider: input.provider,
+    strategy: input.strategy,
+    cacheStatus: "bypass" as const,
+    outcome: "empty" as const,
+    rowCount: 0,
+    notes: [input.note],
+  };
+
+  attempts.push({
+    ...common,
+    ...(input.query ? { query: input.query } : {}),
+    ...(input.itemId ? { itemId: input.itemId } : {}),
+    ...(input.prdSe ? { prdSe: input.prdSe } : {}),
+    ...(typeof input.attemptIndex === "number" ? { attemptIndex: input.attemptIndex } : {}),
+    ...(input.parentListId ? { parentListId: input.parentListId } : {}),
+    ...(typeof input.depth === "number" ? { depth: input.depth } : {}),
+  } as T);
+}
+
 function sanitizeSearchQuery(query: string): string {
   return query
     .replace(/대한민국|한국|국내|지난|최근|비교해줘|비교|보여줘|설명해줘|무엇인지|의미|설명자료/g, "")
@@ -1116,20 +1162,20 @@ function buildTableSearchAttempts(
   intent: QueryIntent,
   queryPlan: QueryPlanItem[],
 ): TableSearchAttempt[] {
-  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query));
+  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query)).slice(0, 6);
   const sanitizedQueries = uniqueStrings(exactQueries.map(sanitizeSearchQuery)).filter(
     (query) => query.length >= 2,
-  );
+  ).slice(0, 4);
   const measureQueries = uniqueStrings([
     ...intent.measures,
     ...intent.keywords.slice(0, 2),
-  ]).filter((query) => query.length >= 2);
-  const domainQueries = uniqueStrings(intent.searchHints).filter((query) => query.length >= 2);
+  ]).filter((query) => query.length >= 2).slice(0, 3);
+  const domainQueries = uniqueStrings(intent.searchHints).filter((query) => query.length >= 2).slice(0, 3);
   const suffixQueries = uniqueStrings(
     [...intent.measures, ...intent.keywords.slice(0, 2)].flatMap((query) =>
       query.length >= 2 ? [`${query} 통계표`, `${query} 통계자료`] : [],
     ),
-  );
+  ).slice(0, 2);
 
   return [
     ...exactQueries.map((query) => ({ query, strategy: "exact-plan" as const })),
@@ -1159,9 +1205,13 @@ function buildCatalogSearchAttempts(
   return [
     { query: exactQuery, strategy: "primary-depth1", depthLimit: 1, views: primaryViews },
     { query: exactQuery, strategy: "primary-depth2", depthLimit: 2, views: primaryViews },
-    { query: exactQuery, strategy: "alternate-depth1", depthLimit: 1, views: alternateViews },
-    { query: sanitizedQuery, strategy: "alternate-depth2", depthLimit: 2, views: alternateViews },
-    { query: keywordQuery, strategy: "keyword-focused", depthLimit: 2, views: primaryViews },
+    { query: sanitizedQuery, strategy: "alternate-depth1", depthLimit: 1, views: alternateViews },
+    {
+      query: keywordQuery,
+      strategy: "keyword-focused",
+      depthLimit: intent.primaryIntent === "browse" ? 2 : 1,
+      views: primaryViews,
+    },
   ];
 }
 
@@ -1178,13 +1228,16 @@ function buildIndicatorAttempts(
   intent: QueryIntent,
   queryPlan: QueryPlanItem[],
 ): IndicatorSearchAttempt[] {
-  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query));
+  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query)).slice(
+    0,
+    INDICATOR_EXACT_QUERY_LIMIT,
+  );
   const sanitizedQueries = uniqueStrings([
     ...exactQueries.map(sanitizeIndicatorQuery),
     ...intent.measures,
     ...intent.keywords.filter((keyword) => keyword.length >= 2),
     sanitizeIndicatorQuery(question),
-  ]).filter((query) => query.length >= 2);
+  ]).filter((query) => query.length >= 2).slice(0, INDICATOR_SANITIZED_QUERY_LIMIT);
 
   const attempts: IndicatorSearchAttempt[] = [];
   for (const query of exactQueries) {
@@ -2227,6 +2280,10 @@ function buildComparisonResult(
       ? `공통 수록시점 ${commonPeriods.slice(-3).join(", ")} 중심 비교가 가능합니다.`
       : "공통 시점이 없으면 동일 기간을 지정해 다시 조회하는 것이 좋습니다.",
     options?.focus ? `비교 초점 "${options.focus}" 기준으로 해석을 이어가면 됩니다.` : "",
+    options?.timeRange ? `planner가 잡은 기간 축은 ${options.timeRange}입니다.` : "",
+    options?.regions && options.regions.length > 0
+      ? `planner가 잡은 지역 축은 ${options.regions.join(", ")}입니다.`
+      : "",
   ]);
 
   return {
@@ -2246,6 +2303,10 @@ function buildComparisonResult(
     warnings,
     analysisHints,
     evidence: uniqueStrings([
+      options?.timeRange ? `기간 계획: ${options.timeRange}` : "",
+      options?.regions && options.regions.length > 0
+        ? `지역 계획: ${options.regions.join(", ")}`
+        : "",
       ...bundles.flatMap((bundle) => bundle.warnings),
       ...bundles.flatMap((bundle) =>
         bundle.dataPreview.slice(0, 3).map((row) => textFromRecord(row)),
@@ -2593,6 +2654,719 @@ export class KosisService {
     return buildQuestionPlan(question, searchHints);
   }
 
+  private async executeTopicSearch(input: {
+    question: string;
+    intent: QueryIntent;
+    keywords: string[];
+    queryPlan: QueryPlanItem[];
+    limit: number;
+  }): Promise<SearchTopicsResult> {
+    const aggregate = new Map<string, NormalizedSearchResult>();
+    const attempts = buildTableSearchAttempts(
+      input.question,
+      input.intent,
+      input.queryPlan,
+    );
+    const attemptLogs: SearchAttemptLog[] = [];
+    const startedAt = Date.now();
+    const targetResultCount = Math.max(input.limit, TABLE_RESULT_TARGET);
+
+    for (const [queryIndex, attempt] of attempts.entries()) {
+      if (attemptLogs.length >= TABLE_ATTEMPT_LIMIT) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "statisticsSearch",
+          strategy: "budget-stop-attempt-limit",
+          note: "표 검색 attempt 상한에 도달해 여기서 멈춥니다.",
+        });
+        break;
+      }
+      if (Date.now() - startedAt >= TABLE_SEARCH_BUDGET_MS) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "statisticsSearch",
+          strategy: "budget-stop-wall-clock",
+          note: "표 검색 시간 예산을 넘겨 현재 후보로 마감합니다.",
+        });
+        break;
+      }
+      try {
+        const records = await this.client.searchStatistics({
+          searchNm: attempt.query,
+          resultCount: Math.max(input.limit * 2, 10),
+        });
+        attemptLogs.push({
+          query: attempt.query,
+          provider: "statisticsSearch",
+          strategy: attempt.strategy,
+          cacheStatus: "bypass",
+          outcome: records.length > 0 ? "ok" : "empty",
+          rowCount: records.length,
+          notes: [
+            records.length > 0
+              ? "통합검색에서 표 후보를 확보했습니다."
+              : "검색은 성공했지만 결과가 비었습니다.",
+          ],
+        });
+
+        for (const [rankIndex, record] of records.entries()) {
+          const { score, whyMatched } = scoreSearchRecord(
+            input.keywords,
+            attempt.query,
+            queryIndex,
+            rankIndex,
+            record,
+            input.intent,
+          );
+          const normalized = normalizeSearchRecord(record, score, whyMatched);
+          if (!normalized) {
+            continue;
+          }
+
+          const current = aggregate.get(normalized.tableKey);
+          if (!current || current.score < normalized.score) {
+            aggregate.set(normalized.tableKey, normalized);
+          } else {
+            current.score += 3;
+            current.whyMatched = uniqueStrings([
+              ...current.whyMatched,
+              ...normalized.whyMatched,
+            ]);
+          }
+        }
+        if (
+          aggregate.size >= targetResultCount &&
+          queryIndex >= 1 &&
+          attemptLogs.filter((entry) => entry.outcome === "ok").length >= 2
+        ) {
+          appendBudgetStopNote(attemptLogs, {
+            query: attempt.query,
+            provider: "statisticsSearch",
+            strategy: "budget-stop-enough-results",
+            note: "표 후보가 충분해 추가 재시도 없이 마감합니다.",
+          });
+          break;
+        }
+      } catch (error) {
+        const classification = classifyKosisError(error);
+        attemptLogs.push({
+          query: attempt.query,
+          provider: "statisticsSearch",
+          strategy: attempt.strategy,
+          cacheStatus: "bypass",
+          outcome: "error",
+          rowCount: 0,
+          errorType: classification.errorType,
+          errorClass: classification.errorClass,
+          notes: [classification.note],
+        });
+        if (!classification.shouldFallback) {
+          throw error;
+        }
+      }
+    }
+
+    const results = [...aggregate.values()]
+      .sort((left, right) => right.score - left.score)
+      .slice(0, input.limit);
+
+    if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
+      throw new KosisApiError(
+        "usable output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
+        "50",
+      );
+    }
+
+    return {
+      cacheStatus: "miss",
+      queryPlan: input.queryPlan,
+      attempts: attemptLogs,
+      results,
+    };
+  }
+
+  private async executeIndicatorSearch(input: {
+    question: string;
+    intent: QueryIntent;
+    keywords: string[];
+    queryPlan: QueryPlanItem[];
+    limit: number;
+  }): Promise<SearchIndicatorsResult> {
+    const aggregate = new Map<string, NormalizedIndicatorResult>();
+    const attemptLogs: IndicatorSearchAttemptLog[] = [];
+    const attempts = buildIndicatorAttempts(
+      input.question,
+      input.intent,
+      input.queryPlan,
+    );
+    const discoveredIds = new Set<string>();
+    const indicatorSearchWindow = Math.max(input.limit * 6, 30);
+    const startedAt = Date.now();
+    const targetResultCount = Math.max(input.limit, INDICATOR_RESULT_TARGET);
+    const pushRecords = (
+      records: JsonRecord[],
+      query: string,
+      queryIndex: number,
+      strategy: IndicatorSearchAttempt["strategy"],
+      baseBonus = 0,
+    ) => {
+      for (const [rankIndex, record] of records.entries()) {
+        const indicatorId = readString(record, "statJipyoId") ?? readString(record, "jipyoId");
+        if (indicatorId) {
+          discoveredIds.add(indicatorId);
+        }
+
+        const { score, whyMatched } = scoreIndicatorRecord(
+          input.keywords,
+          query,
+          queryIndex,
+          rankIndex,
+          record,
+          input.intent,
+        );
+        const normalized = normalizeIndicatorRecord(
+          record,
+          score + baseBonus,
+          whyMatched,
+          query,
+          strategy,
+        );
+        if (!normalized) {
+          continue;
+        }
+
+        const current = aggregate.get(normalized.indicatorKey);
+        if (!current || current.score < normalized.score) {
+          aggregate.set(normalized.indicatorKey, normalized);
+        } else {
+          current.score += 2;
+          current.whyMatched = uniqueStrings([
+            ...current.whyMatched,
+            ...normalized.whyMatched,
+          ]);
+          current.matchedQueries = uniqueStrings([
+            ...current.matchedQueries,
+            ...normalized.matchedQueries,
+          ]);
+          current.matchedStrategies = uniqueStrings([
+            ...current.matchedStrategies,
+            ...normalized.matchedStrategies,
+          ]);
+          current.raw = {
+            ...current.raw,
+            ...normalized.raw,
+          };
+        }
+      }
+    };
+
+    for (const [queryIndex, attempt] of attempts.entries()) {
+      if (attemptLogs.length >= INDICATOR_ATTEMPT_LIMIT) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "indicatorListByName",
+          strategy: "budget-stop-attempt-limit",
+          note: "지표 검색 attempt 상한에 도달해 여기서 멈춥니다.",
+        });
+        break;
+      }
+      if (Date.now() - startedAt >= INDICATOR_SEARCH_BUDGET_MS) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "indicatorListByName",
+          strategy: "budget-stop-wall-clock",
+          note: "지표 검색 시간 예산을 넘겨 현재 후보로 마감합니다.",
+        });
+        break;
+      }
+      try {
+        switch (attempt.strategy) {
+          case "list-exact":
+          case "list-sanitized": {
+            const records = await this.client.searchIndicatorLists({
+              indicatorName: attempt.query,
+              numOfRows: indicatorSearchWindow,
+            });
+            attemptLogs.push({
+              query: attempt.query,
+              provider: "indicatorListByName",
+              strategy: attempt.strategy,
+              cacheStatus: "bypass",
+              outcome: records.length > 0 ? "ok" : "empty",
+              rowCount: records.length,
+              notes: ["지표 목록 후보를 조회했습니다."],
+            });
+            pushRecords(
+              records,
+              attempt.query,
+              queryIndex,
+              attempt.strategy,
+              attempt.strategy === "list-sanitized" ? 4 : 0,
+            );
+            break;
+          }
+          case "explain-exact":
+          case "explain-sanitized": {
+            const records = await this.client.getIndicatorExplanationByName({
+              indicatorName: attempt.query,
+              numOfRows: indicatorSearchWindow,
+            });
+            attemptLogs.push({
+              query: attempt.query,
+              provider: "indicatorExplainByName",
+              strategy: attempt.strategy,
+              cacheStatus: "bypass",
+              outcome: records.length > 0 ? "ok" : "empty",
+              rowCount: records.length,
+              notes: ["지표 설명 후보를 조회했습니다."],
+            });
+            pushRecords(
+              records,
+              attempt.query,
+              queryIndex,
+              attempt.strategy,
+              attempt.strategy === "explain-sanitized" ? 4 : 0,
+            );
+            break;
+          }
+          case "detail-exact":
+          case "detail-sanitized": {
+            const records = await this.client.getIndicatorDetailByName({
+              indicatorName: attempt.query,
+              srvRn: input.intent.recentPeriods ? Math.min(input.intent.recentPeriods, 12) : 5,
+              numOfRows: indicatorSearchWindow,
+            });
+            attemptLogs.push({
+              query: attempt.query,
+              provider: "indicatorDetailByName",
+              strategy: attempt.strategy,
+              cacheStatus: "bypass",
+              outcome: records.length > 0 ? "ok" : "empty",
+              rowCount: records.length,
+              notes: ["지표 상세 수치 후보를 조회했습니다."],
+            });
+            pushRecords(
+              records,
+              attempt.query,
+              queryIndex,
+              attempt.strategy,
+              attempt.strategy === "detail-sanitized" ? 6 : 2,
+            );
+            break;
+          }
+          case "id-explain":
+          case "id-detail":
+            break;
+        }
+        const enoughIndicatorCandidates =
+          aggregate.size >= targetResultCount &&
+          attemptLogs.filter((entry) => entry.outcome === "ok").length >= 3;
+        if (enoughIndicatorCandidates) {
+          appendBudgetStopNote(attemptLogs, {
+            query: attempt.query,
+            provider: "indicatorListByName",
+            strategy: "budget-stop-enough-results",
+            note: "지표 후보가 충분해 이름 기반 재시도를 여기서 멈춥니다.",
+          });
+          break;
+        }
+      } catch (error) {
+        const classification = classifyKosisError(error);
+        attemptLogs.push({
+          query: attempt.query,
+          provider:
+            attempt.strategy.startsWith("list")
+              ? "indicatorListByName"
+              : attempt.strategy.startsWith("explain")
+                ? "indicatorExplainByName"
+                : "indicatorDetailByName",
+          strategy: attempt.strategy,
+          cacheStatus: "bypass",
+          outcome: "error",
+          rowCount: 0,
+          errorType: classification.errorType,
+          errorClass: classification.errorClass,
+          notes: [classification.note],
+        });
+        if (!classification.shouldFallback) {
+          throw error;
+        }
+      }
+    }
+
+    const discoveredIdList = [...discoveredIds].slice(0, INDICATOR_DISCOVERED_ID_LIMIT);
+    for (const [idIndex, indicatorId] of discoveredIdList.entries()) {
+      if (attemptLogs.length >= INDICATOR_ATTEMPT_LIMIT) {
+        appendBudgetStopNote(attemptLogs, {
+          query: indicatorId,
+          provider: "indicatorExplainById",
+          strategy: "budget-stop-attempt-limit",
+          note: "지표 ID 보강 attempt 상한에 도달해 멈춥니다.",
+        });
+        break;
+      }
+      if (Date.now() - startedAt >= INDICATOR_SEARCH_BUDGET_MS) {
+        appendBudgetStopNote(attemptLogs, {
+          query: indicatorId,
+          provider: "indicatorExplainById",
+          strategy: "budget-stop-wall-clock",
+          note: "지표 ID 보강 시간 예산을 넘겨 현재 후보로 마감합니다.",
+        });
+        break;
+      }
+      try {
+        const explainRows = await this.client.getIndicatorExplanationById({
+          indicatorId,
+          numOfRows: 5,
+        });
+        attemptLogs.push({
+          query: indicatorId,
+          provider: "indicatorExplainById",
+          strategy: "id-explain",
+          cacheStatus: "bypass",
+          outcome: explainRows.length > 0 ? "ok" : "empty",
+          rowCount: explainRows.length,
+          notes: ["지표 ID 기반 설명자료를 보강했습니다."],
+        });
+        pushRecords(explainRows, indicatorId, attempts.length + idIndex, "id-explain", 8);
+      } catch (error) {
+        const classification = classifyKosisError(error);
+        attemptLogs.push({
+          query: indicatorId,
+          provider: "indicatorExplainById",
+          strategy: "id-explain",
+          cacheStatus: "bypass",
+          outcome: "error",
+          rowCount: 0,
+          errorType: classification.errorType,
+          errorClass: classification.errorClass,
+          notes: [classification.note],
+        });
+        if (!classification.shouldFallback) {
+          throw error;
+        }
+      }
+
+      if (
+        aggregate.size >= targetResultCount &&
+        attemptLogs.filter((entry) => entry.provider === "indicatorExplainById" && entry.outcome === "ok").length >= 1
+      ) {
+        appendBudgetStopNote(attemptLogs, {
+          query: indicatorId,
+          provider: "indicatorExplainById",
+          strategy: "budget-stop-enough-results",
+          note: "지표 설명 후보가 충분해 ID 보강을 줄입니다.",
+        });
+        break;
+      }
+
+      try {
+        const detailRows = await this.client.getIndicatorDetailById({
+          indicatorId,
+          srvRn: input.intent.recentPeriods ? Math.min(input.intent.recentPeriods, 12) : 5,
+          numOfRows: 10,
+        });
+        attemptLogs.push({
+          query: indicatorId,
+          provider: "indicatorDetailById",
+          strategy: "id-detail",
+          cacheStatus: "bypass",
+          outcome: detailRows.length > 0 ? "ok" : "empty",
+          rowCount: detailRows.length,
+          notes: ["지표 ID 기반 상세 수치를 보강했습니다."],
+        });
+        pushRecords(detailRows, indicatorId, attempts.length + idIndex, "id-detail", 10);
+      } catch (error) {
+        const classification = classifyKosisError(error);
+        attemptLogs.push({
+          query: indicatorId,
+          provider: "indicatorDetailById",
+          strategy: "id-detail",
+          cacheStatus: "bypass",
+          outcome: "error",
+          rowCount: 0,
+          errorType: classification.errorType,
+          errorClass: classification.errorClass,
+          notes: [classification.note],
+        });
+        if (!classification.shouldFallback) {
+          throw error;
+        }
+      }
+    }
+
+    const results = [...aggregate.values()]
+      .sort((left, right) => right.score - left.score)
+      .slice(0, input.limit);
+
+    if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
+      throw new KosisApiError(
+        "usable indicator output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
+        "50",
+      );
+    }
+
+    return {
+      cacheStatus: "miss",
+      queryPlan: input.queryPlan,
+      attempts: attemptLogs,
+      results,
+    };
+  }
+
+  private async executeCatalogBrowse(input: {
+    question: string;
+    intent: QueryIntent;
+    keywords: string[];
+    queryPlan: QueryPlanItem[];
+    limit: number;
+  }): Promise<BrowseCatalogResult> {
+    const catalogAttempts = buildCatalogSearchAttempts(
+      input.question,
+      input.intent,
+      input.queryPlan,
+    );
+    const aggregate = new Map<string, CatalogResult>();
+    const attemptLogs: SearchAttemptLog[] = [];
+    const exploredViewsMap = new Map<string, CatalogView>();
+    const startedAt = Date.now();
+    const targetResultCount = Math.max(input.limit, CATALOG_RESULT_TARGET);
+    let foundDeepCatalogResult = false;
+
+    for (const [attemptIndex, attempt] of catalogAttempts.entries()) {
+      if (attemptLogs.length >= CATALOG_ATTEMPT_LIMIT) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "statisticsList",
+          strategy: "budget-stop-attempt-limit",
+          note: "카탈로그 탐색 attempt 상한에 도달해 멈춥니다.",
+        });
+        break;
+      }
+      if (Date.now() - startedAt >= CATALOG_SEARCH_BUDGET_MS) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "statisticsList",
+          strategy: "budget-stop-wall-clock",
+          note: "카탈로그 탐색 시간 예산을 넘겨 현재 후보로 마감합니다.",
+        });
+        break;
+      }
+      for (const view of attempt.views) {
+        exploredViewsMap.set(view.vwCd, view);
+        const queue: Array<{
+          parentListId: string;
+          depth: number;
+          parentScore: number;
+          parentReasons: string[];
+        }> = [
+          {
+            parentListId: view.parentListId,
+            depth: 0,
+            parentScore: 0,
+            parentReasons: [],
+          },
+        ];
+        const visitedParentIds = new Set<string>();
+
+        while (queue.length > 0) {
+          if (attemptLogs.length >= CATALOG_ATTEMPT_LIMIT || Date.now() - startedAt >= CATALOG_SEARCH_BUDGET_MS) {
+            break;
+          }
+          const currentParent = queue.shift()!;
+          const visitKey = `${attempt.strategy}:${view.vwCd}:${currentParent.parentListId}:${currentParent.depth}`;
+          if (visitedParentIds.has(visitKey)) {
+            continue;
+          }
+          visitedParentIds.add(visitKey);
+
+          let records: JsonRecord[] = [];
+          try {
+            records = await this.client.getStatisticsList({
+              vwCd: view.vwCd,
+              parentListId: currentParent.parentListId,
+            });
+            attemptLogs.push({
+              query: attempt.query,
+              provider: "statisticsList",
+              strategy: attempt.strategy,
+              cacheStatus: "bypass",
+              outcome: records.length > 0 ? "ok" : "empty",
+              rowCount: records.length,
+              parentListId: currentParent.parentListId,
+              depth: currentParent.depth,
+              notes: [
+                `${view.name} 뷰`,
+                `depth limit=${attempt.depthLimit}`,
+              ],
+            });
+          } catch (error) {
+            const classification = classifyKosisError(error);
+            attemptLogs.push({
+              query: attempt.query,
+              provider: "statisticsList",
+              strategy: attempt.strategy,
+              cacheStatus: "bypass",
+              outcome: "error",
+              rowCount: 0,
+              parentListId: currentParent.parentListId,
+              depth: currentParent.depth,
+              errorType: classification.errorType,
+              errorClass: classification.errorClass,
+              notes: [classification.note, `${view.name} 뷰`],
+            });
+            if (!classification.shouldFallback) {
+              throw error;
+            }
+            continue;
+          }
+
+          const levelResults = records
+            .map((record, index) => {
+              const { score, whyMatched } = scoreCatalogRecord(
+                input.keywords,
+                attempt.query,
+                view,
+                record,
+                currentParent.depth,
+                attemptIndex,
+                index,
+              );
+              return normalizeCatalogRecord(
+                view,
+                record,
+                score + Math.max(currentParent.parentScore / 8, 0),
+                uniqueStrings([...currentParent.parentReasons, ...whyMatched]),
+                currentParent.depth,
+              );
+            })
+            .filter((value): value is CatalogResult => value !== null);
+
+          for (const result of levelResults) {
+            const existing = aggregate.get(result.catalogKey);
+            if (!existing || existing.score < result.score) {
+              aggregate.set(result.catalogKey, result);
+            }
+            if (result.depth >= 2) {
+              foundDeepCatalogResult = true;
+            }
+          }
+
+          if (
+            aggregate.size >= targetResultCount &&
+            currentParent.depth >= 1 &&
+            (
+              input.intent.primaryIntent !== "browse" ||
+              foundDeepCatalogResult
+            )
+          ) {
+            queue.length = 0;
+            break;
+          }
+
+          if (currentParent.depth >= attempt.depthLimit) {
+            continue;
+          }
+
+          const nextParents = levelResults
+            .filter((result) => result.listId && !result.tblId)
+            .sort((left, right) => right.score - left.score)
+            .slice(0, currentParent.depth === 0 ? 3 : 2);
+
+          for (const nextParent of nextParents) {
+            queue.push({
+              parentListId: nextParent.listId!,
+              depth: currentParent.depth + 1,
+              parentScore: nextParent.score,
+              parentReasons: nextParent.whyMatched,
+            });
+          }
+        }
+
+        if (
+          attemptLogs.length >= CATALOG_ATTEMPT_LIMIT ||
+          Date.now() - startedAt >= CATALOG_SEARCH_BUDGET_MS ||
+          (
+            aggregate.size >= targetResultCount &&
+            (
+              input.intent.primaryIntent !== "browse" ||
+              foundDeepCatalogResult
+            )
+          )
+        ) {
+          break;
+        }
+      }
+
+      if (
+        attemptLogs.length >= CATALOG_ATTEMPT_LIMIT ||
+        Date.now() - startedAt >= CATALOG_SEARCH_BUDGET_MS ||
+        (
+          aggregate.size >= targetResultCount &&
+          (
+            input.intent.primaryIntent !== "browse" ||
+            foundDeepCatalogResult
+          )
+        )
+      ) {
+        appendBudgetStopNote(attemptLogs, {
+          query: attempt.query,
+          provider: "statisticsList",
+          strategy: aggregate.size >= targetResultCount ? "budget-stop-enough-results" : "budget-stop-wall-clock",
+          note:
+            aggregate.size >= targetResultCount
+              ? "카탈로그 후보가 충분해 탐색을 조기 종료합니다."
+              : "카탈로그 탐색 시간 예산을 넘겨 현재 후보로 마감합니다.",
+        });
+        break;
+      }
+    }
+
+    const sorted = [...aggregate.values()].sort((left, right) => right.score - left.score);
+    const seededResults = [
+      ...sorted
+        .filter((result) => !result.tblId && result.depth === 0)
+        .slice(0, Math.max(1, Math.floor(input.limit / 3))),
+      ...sorted
+        .filter((result) => result.depth >= 2)
+        .slice(0, Math.max(1, Math.floor(input.limit / 3))),
+      ...sorted
+        .filter((result) => Boolean(result.tblId))
+        .slice(0, Math.max(1, Math.ceil(input.limit / 3))),
+      ...sorted
+        .filter((result) => Boolean(result.listId) && !result.tblId)
+        .slice(0, Math.max(1, Math.floor(input.limit / 2))),
+      ...sorted,
+    ];
+    const results: CatalogResult[] = [];
+    const seen = new Set<string>();
+    for (const result of seededResults) {
+      if (seen.has(result.catalogKey)) {
+        continue;
+      }
+      seen.add(result.catalogKey);
+      results.push(result);
+      if (results.length >= input.limit) {
+        break;
+      }
+    }
+
+    if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
+      throw new KosisApiError(
+        "usable catalog output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
+        "50",
+      );
+    }
+
+    return {
+      cacheStatus: "miss",
+      queryPlan: input.queryPlan,
+      exploredViews: [...exploredViewsMap.values()],
+      attempts: attemptLogs,
+      results,
+    };
+  }
+
   async searchTopics(
     question: string,
     searchHints: string[] = [],
@@ -2605,91 +3379,13 @@ export class KosisService {
       async () => {
         const intent = inferQuestionIntent(question);
         const { keywords, queryPlan } = buildQueryPlan(question, searchHints, intent, "table");
-        const aggregate = new Map<string, NormalizedSearchResult>();
-        const attempts = buildTableSearchAttempts(question, intent, queryPlan);
-        const attemptLogs: SearchAttemptLog[] = [];
-
-        for (const [queryIndex, attempt] of attempts.entries()) {
-          try {
-            const records = await this.client.searchStatistics({
-              searchNm: attempt.query,
-              resultCount: Math.max(limit * 2, 10),
-            });
-            attemptLogs.push({
-              query: attempt.query,
-              provider: "statisticsSearch",
-              strategy: attempt.strategy,
-              cacheStatus: "bypass",
-              outcome: records.length > 0 ? "ok" : "empty",
-              rowCount: records.length,
-              notes: [
-                records.length > 0
-                  ? "통합검색에서 표 후보를 확보했습니다."
-                  : "검색은 성공했지만 결과가 비었습니다.",
-              ],
-            });
-
-            for (const [rankIndex, record] of records.entries()) {
-              const { score, whyMatched } = scoreSearchRecord(
-                keywords,
-                attempt.query,
-                queryIndex,
-                rankIndex,
-                record,
-                intent,
-              );
-              const normalized = normalizeSearchRecord(record, score, whyMatched);
-              if (!normalized) {
-                continue;
-              }
-
-              const current = aggregate.get(normalized.tableKey);
-              if (!current || current.score < normalized.score) {
-                aggregate.set(normalized.tableKey, normalized);
-              } else {
-                current.score += 3;
-                current.whyMatched = uniqueStrings([
-                  ...current.whyMatched,
-                  ...normalized.whyMatched,
-                ]);
-              }
-            }
-          } catch (error) {
-            const classification = classifyKosisError(error);
-            attemptLogs.push({
-              query: attempt.query,
-              provider: "statisticsSearch",
-              strategy: attempt.strategy,
-              cacheStatus: "bypass",
-              outcome: "error",
-              rowCount: 0,
-              errorType: classification.errorType,
-              errorClass: classification.errorClass,
-              notes: [classification.note],
-            });
-            if (!classification.shouldFallback) {
-              throw error;
-            }
-          }
-        }
-
-        const results = [...aggregate.values()]
-          .sort((left, right) => right.score - left.score)
-          .slice(0, limit);
-
-        if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
-          throw new KosisApiError(
-            "usable output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
-            "50",
-          );
-        }
-
-        return {
-          cacheStatus: "miss",
+        return this.executeTopicSearch({
+          question,
+          intent,
+          keywords,
           queryPlan,
-          attempts: attemptLogs,
-          results,
-        };
+          limit,
+        });
       },
       (error) => classifyKosisError(error).shouldFallback,
     );
@@ -2726,259 +3422,13 @@ export class KosisService {
       async () => {
         const intent = inferQuestionIntent(question);
         const { keywords, queryPlan } = buildQueryPlan(question, searchHints, intent, "indicator");
-        const aggregate = new Map<string, NormalizedIndicatorResult>();
-        const attemptLogs: IndicatorSearchAttemptLog[] = [];
-        const attempts = buildIndicatorAttempts(question, intent, queryPlan);
-        const discoveredIds = new Set<string>();
-        const indicatorSearchWindow = Math.max(limit * 6, 30);
-        const pushRecords = (
-          records: JsonRecord[],
-          query: string,
-          queryIndex: number,
-          strategy: IndicatorSearchAttempt["strategy"],
-          baseBonus = 0,
-        ) => {
-          for (const [rankIndex, record] of records.entries()) {
-            const indicatorId = readString(record, "statJipyoId") ?? readString(record, "jipyoId");
-            if (indicatorId) {
-              discoveredIds.add(indicatorId);
-            }
-
-              const { score, whyMatched } = scoreIndicatorRecord(
-                keywords,
-                query,
-                queryIndex,
-                rankIndex,
-                record,
-                intent,
-              );
-            const normalized = normalizeIndicatorRecord(
-              record,
-              score + baseBonus,
-              whyMatched,
-              query,
-              strategy,
-            );
-            if (!normalized) {
-              continue;
-            }
-
-            const current = aggregate.get(normalized.indicatorKey);
-            if (!current || current.score < normalized.score) {
-              aggregate.set(normalized.indicatorKey, normalized);
-            } else {
-              current.score += 2;
-              current.whyMatched = uniqueStrings([
-                ...current.whyMatched,
-                ...normalized.whyMatched,
-              ]);
-              current.matchedQueries = uniqueStrings([
-                ...current.matchedQueries,
-                ...normalized.matchedQueries,
-              ]);
-              current.matchedStrategies = uniqueStrings([
-                ...current.matchedStrategies,
-                ...normalized.matchedStrategies,
-              ]);
-              current.raw = {
-                ...current.raw,
-                ...normalized.raw,
-              };
-            }
-          }
-        };
-
-        for (const [queryIndex, attempt] of attempts.entries()) {
-          try {
-            switch (attempt.strategy) {
-              case "list-exact":
-              case "list-sanitized": {
-                const records = await this.client.searchIndicatorLists({
-                  indicatorName: attempt.query,
-                  numOfRows: indicatorSearchWindow,
-                });
-                attemptLogs.push({
-                  query: attempt.query,
-                  provider: "indicatorListByName",
-                  strategy: attempt.strategy,
-                  cacheStatus: "bypass",
-                  outcome: records.length > 0 ? "ok" : "empty",
-                  rowCount: records.length,
-                  notes: ["지표 목록 후보를 조회했습니다."],
-                });
-                pushRecords(
-                  records,
-                  attempt.query,
-                  queryIndex,
-                  attempt.strategy,
-                  attempt.strategy === "list-sanitized" ? 4 : 0,
-                );
-                break;
-              }
-              case "explain-exact":
-              case "explain-sanitized": {
-                const records = await this.client.getIndicatorExplanationByName({
-                  indicatorName: attempt.query,
-                  numOfRows: indicatorSearchWindow,
-                });
-                attemptLogs.push({
-                  query: attempt.query,
-                  provider: "indicatorExplainByName",
-                  strategy: attempt.strategy,
-                  cacheStatus: "bypass",
-                  outcome: records.length > 0 ? "ok" : "empty",
-                  rowCount: records.length,
-                  notes: ["지표 설명 후보를 조회했습니다."],
-                });
-                pushRecords(
-                  records,
-                  attempt.query,
-                  queryIndex,
-                  attempt.strategy,
-                  attempt.strategy === "explain-sanitized" ? 4 : 0,
-                );
-                break;
-              }
-              case "detail-exact":
-              case "detail-sanitized": {
-                const records = await this.client.getIndicatorDetailByName({
-                  indicatorName: attempt.query,
-                  srvRn: intent.recentPeriods ? Math.min(intent.recentPeriods, 12) : 5,
-                  numOfRows: indicatorSearchWindow,
-                });
-                attemptLogs.push({
-                  query: attempt.query,
-                  provider: "indicatorDetailByName",
-                  strategy: attempt.strategy,
-                  cacheStatus: "bypass",
-                  outcome: records.length > 0 ? "ok" : "empty",
-                  rowCount: records.length,
-                  notes: ["지표 상세 수치 후보를 조회했습니다."],
-                });
-                pushRecords(
-                  records,
-                  attempt.query,
-                  queryIndex,
-                  attempt.strategy,
-                  attempt.strategy === "detail-sanitized" ? 6 : 2,
-                );
-                break;
-              }
-              case "id-explain":
-              case "id-detail":
-                break;
-            }
-          } catch (error) {
-            const classification = classifyKosisError(error);
-            attemptLogs.push({
-              query: attempt.query,
-              provider:
-                attempt.strategy.startsWith("list")
-                  ? "indicatorListByName"
-                  : attempt.strategy.startsWith("explain")
-                    ? "indicatorExplainByName"
-                    : "indicatorDetailByName",
-              strategy: attempt.strategy,
-              cacheStatus: "bypass",
-              outcome: "error",
-              rowCount: 0,
-              errorType: classification.errorType,
-              errorClass: classification.errorClass,
-              notes: [classification.note],
-            });
-            if (!classification.shouldFallback) {
-              throw error;
-            }
-          }
-        }
-
-        const discoveredIdList = [...discoveredIds].slice(0, 10);
-        for (const [idIndex, indicatorId] of discoveredIdList.entries()) {
-          try {
-            const explainRows = await this.client.getIndicatorExplanationById({
-              indicatorId,
-              numOfRows: 5,
-            });
-            attemptLogs.push({
-              query: indicatorId,
-              provider: "indicatorExplainById",
-              strategy: "id-explain",
-              cacheStatus: "bypass",
-              outcome: explainRows.length > 0 ? "ok" : "empty",
-              rowCount: explainRows.length,
-              notes: ["지표 ID 기반 설명자료를 보강했습니다."],
-            });
-            pushRecords(explainRows, indicatorId, attempts.length + idIndex, "id-explain", 8);
-          } catch (error) {
-            const classification = classifyKosisError(error);
-            attemptLogs.push({
-              query: indicatorId,
-              provider: "indicatorExplainById",
-              strategy: "id-explain",
-              cacheStatus: "bypass",
-              outcome: "error",
-              rowCount: 0,
-              errorType: classification.errorType,
-              errorClass: classification.errorClass,
-              notes: [classification.note],
-            });
-            if (!classification.shouldFallback) {
-              throw error;
-            }
-          }
-
-          try {
-            const detailRows = await this.client.getIndicatorDetailById({
-              indicatorId,
-              srvRn: intent.recentPeriods ? Math.min(intent.recentPeriods, 12) : 5,
-              numOfRows: 10,
-            });
-            attemptLogs.push({
-              query: indicatorId,
-              provider: "indicatorDetailById",
-              strategy: "id-detail",
-              cacheStatus: "bypass",
-              outcome: detailRows.length > 0 ? "ok" : "empty",
-              rowCount: detailRows.length,
-              notes: ["지표 ID 기반 상세 수치를 보강했습니다."],
-            });
-            pushRecords(detailRows, indicatorId, attempts.length + idIndex, "id-detail", 10);
-          } catch (error) {
-            const classification = classifyKosisError(error);
-            attemptLogs.push({
-              query: indicatorId,
-              provider: "indicatorDetailById",
-              strategy: "id-detail",
-              cacheStatus: "bypass",
-              outcome: "error",
-              rowCount: 0,
-              errorType: classification.errorType,
-              errorClass: classification.errorClass,
-              notes: [classification.note],
-            });
-            if (!classification.shouldFallback) {
-              throw error;
-            }
-          }
-        }
-
-        const results = [...aggregate.values()]
-          .sort((left, right) => right.score - left.score)
-          .slice(0, limit);
-
-        if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
-          throw new KosisApiError(
-            "usable indicator output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
-            "50",
-          );
-        }
-
-        return {
-          cacheStatus: "miss",
+        return this.executeIndicatorSearch({
+          question,
+          intent,
+          keywords,
           queryPlan,
-          attempts: attemptLogs,
-          results,
-        };
+          limit,
+        });
       },
       (error) => classifyKosisError(error).shouldFallback,
     );
@@ -3014,170 +3464,13 @@ export class KosisService {
       async () => {
         const intent = inferQuestionIntent(question);
         const { keywords, queryPlan } = buildQueryPlan(question, searchHints, intent, "catalog");
-        const catalogAttempts = buildCatalogSearchAttempts(question, intent, queryPlan);
-        const aggregate = new Map<string, CatalogResult>();
-        const attemptLogs: SearchAttemptLog[] = [];
-        const exploredViewsMap = new Map<string, CatalogView>();
-
-        for (const [attemptIndex, attempt] of catalogAttempts.entries()) {
-          for (const view of attempt.views) {
-            exploredViewsMap.set(view.vwCd, view);
-            const queue: Array<{
-              parentListId: string;
-              depth: number;
-              parentScore: number;
-              parentReasons: string[];
-            }> = [
-              {
-                parentListId: view.parentListId,
-                depth: 0,
-                parentScore: 0,
-                parentReasons: [],
-              },
-            ];
-            const visitedParentIds = new Set<string>();
-
-            while (queue.length > 0) {
-              const currentParent = queue.shift()!;
-              const visitKey = `${attempt.strategy}:${view.vwCd}:${currentParent.parentListId}:${currentParent.depth}`;
-              if (visitedParentIds.has(visitKey)) {
-                continue;
-              }
-              visitedParentIds.add(visitKey);
-
-              let records: JsonRecord[] = [];
-              try {
-                records = await this.client.getStatisticsList({
-                  vwCd: view.vwCd,
-                  parentListId: currentParent.parentListId,
-                });
-                attemptLogs.push({
-                  query: attempt.query,
-                  provider: "statisticsList",
-                  strategy: attempt.strategy,
-                  cacheStatus: "bypass",
-                  outcome: records.length > 0 ? "ok" : "empty",
-                  rowCount: records.length,
-                  parentListId: currentParent.parentListId,
-                  depth: currentParent.depth,
-                  notes: [
-                    `${view.name} 뷰`,
-                    `depth limit=${attempt.depthLimit}`,
-                  ],
-                });
-              } catch (error) {
-                const classification = classifyKosisError(error);
-                attemptLogs.push({
-                  query: attempt.query,
-                  provider: "statisticsList",
-                  strategy: attempt.strategy,
-                  cacheStatus: "bypass",
-                  outcome: "error",
-                  rowCount: 0,
-                  parentListId: currentParent.parentListId,
-                  depth: currentParent.depth,
-                  errorType: classification.errorType,
-                  errorClass: classification.errorClass,
-                  notes: [classification.note, `${view.name} 뷰`],
-                });
-                if (!classification.shouldFallback) {
-                  throw error;
-                }
-                continue;
-              }
-
-              const levelResults = records
-                .map((record, index) => {
-                  const { score, whyMatched } = scoreCatalogRecord(
-                    keywords,
-                    attempt.query,
-                    view,
-                    record,
-                    currentParent.depth,
-                    attemptIndex,
-                    index,
-                  );
-                  return normalizeCatalogRecord(
-                    view,
-                    record,
-                    score + Math.max(currentParent.parentScore / 8, 0),
-                    uniqueStrings([...currentParent.parentReasons, ...whyMatched]),
-                    currentParent.depth,
-                  );
-                })
-                .filter((value): value is CatalogResult => value !== null);
-
-              for (const result of levelResults) {
-                const existing = aggregate.get(result.catalogKey);
-                if (!existing || existing.score < result.score) {
-                  aggregate.set(result.catalogKey, result);
-                }
-              }
-
-              if (currentParent.depth >= attempt.depthLimit) {
-                continue;
-              }
-
-              const nextParents = levelResults
-                .filter((result) => result.listId && !result.tblId)
-                .sort((left, right) => right.score - left.score)
-                .slice(0, currentParent.depth === 0 ? 3 : 2);
-
-              for (const nextParent of nextParents) {
-                queue.push({
-                  parentListId: nextParent.listId!,
-                  depth: currentParent.depth + 1,
-                  parentScore: nextParent.score,
-                  parentReasons: nextParent.whyMatched,
-                });
-              }
-            }
-          }
-        }
-
-        const sorted = [...aggregate.values()].sort((left, right) => right.score - left.score);
-        const seededResults = [
-          ...sorted
-            .filter((result) => !result.tblId && result.depth === 0)
-            .slice(0, Math.max(1, Math.floor(limit / 3))),
-          ...sorted
-            .filter((result) => result.depth >= 2)
-            .slice(0, Math.max(1, Math.floor(limit / 3))),
-          ...sorted
-            .filter((result) => Boolean(result.tblId))
-            .slice(0, Math.max(1, Math.ceil(limit / 3))),
-          ...sorted
-            .filter((result) => Boolean(result.listId) && !result.tblId)
-            .slice(0, Math.max(1, Math.floor(limit / 2))),
-          ...sorted,
-        ];
-        const results: CatalogResult[] = [];
-        const seen = new Set<string>();
-        for (const result of seededResults) {
-          if (seen.has(result.catalogKey)) {
-            continue;
-          }
-          seen.add(result.catalogKey);
-          results.push(result);
-          if (results.length >= limit) {
-            break;
-          }
-        }
-
-        if (shouldUseStaleBecauseOutputIsNotUsable(attemptLogs, results.length)) {
-          throw new KosisApiError(
-            "usable catalog output을 만들지 못해 stale cache fallback 후보로 전환합니다.",
-            "50",
-          );
-        }
-
-        return {
-          cacheStatus: "miss",
+        return this.executeCatalogBrowse({
+          question,
+          intent,
+          keywords,
           queryPlan,
-          exploredViews: [...exploredViewsMap.values()],
-          attempts: attemptLogs,
-          results,
-        };
+          limit,
+        });
       },
       (error) => classifyKosisError(error).shouldFallback,
     );
@@ -3803,22 +4096,79 @@ export class KosisService {
     const catalogSearchRuns: BrowseCatalogResult[] = [];
 
     const executeDataset = async (dataset: PlannedDatasetCandidate): Promise<void> => {
+      const hasEnoughTableResults =
+        mergeTopicSearchResults(tableSearchRuns).results.length >= Math.max(limit, 2);
+      const hasEnoughIndicatorResults =
+        mergeIndicatorSearchResults(indicatorSearchRuns).results.length >= Math.max(limit, 2);
+
+      if (
+        dataset.requirement === "optional" &&
+        (
+          (dataset.lane === "indicator-search" && hasEnoughTableResults && indicatorSearchRuns.length >= 1) ||
+          (dataset.lane === "catalog-browse" && hasEnoughTableResults) ||
+          (dataset.lane === "table-search" && hasEnoughTableResults)
+        )
+      ) {
+        plannerExecutions.push({
+          datasetId: dataset.datasetId,
+          lane: dataset.lane,
+          requirement: dataset.requirement,
+          label: dataset.label,
+          seedQuestion: dataset.seedQuestion,
+          queryPlan: dataset.queries,
+          status: "skipped",
+          resultCount: dataset.lane === "indicator-search"
+            ? mergeIndicatorSearchResults(indicatorSearchRuns).results.length
+            : mergeTopicSearchResults(tableSearchRuns).results.length,
+          attemptCount: 0,
+          okCount: 0,
+          emptyCount: 0,
+          errorCount: 0,
+          selectedKeys: [],
+          notes: [
+            dataset.reason,
+            hasEnoughIndicatorResults
+              ? "앞선 후보가 이미 충분해 optional dataset을 건너뜁니다."
+              : "앞선 표 후보가 충분해 optional dataset을 건너뜁니다.",
+          ],
+          failureReasons: [],
+        });
+        return;
+      }
+
+      const datasetKeywords = uniqueStrings([
+        ...intent.keywords,
+        ...dataset.searchHints,
+        ...dataset.queries.flatMap((item) => tokenizeQuestion(item.query)),
+      ]);
       try {
         if (dataset.lane === "table-search") {
-          const result = await this.searchTopics(
-            dataset.seedQuestion,
-            dataset.searchHints,
-            Math.max(limit, dataset.requirement === "required" ? 6 : 4),
-          );
+          const result = await this.executeTopicSearch({
+            question: dataset.seedQuestion,
+            intent,
+            keywords: datasetKeywords,
+            queryPlan: dataset.queries,
+            limit: Math.max(limit, dataset.requirement === "required" ? 6 : 4),
+          });
           tableSearchRuns.push(result);
+          const failureReasons = uniqueStrings(
+            result.attempts
+              .filter((attempt) => attempt.outcome === "error")
+              .flatMap((attempt) => attempt.notes),
+          );
           plannerExecutions.push({
             datasetId: dataset.datasetId,
             lane: dataset.lane,
             requirement: dataset.requirement,
             label: dataset.label,
             seedQuestion: dataset.seedQuestion,
+            queryPlan: dataset.queries,
             status: result.results.length > 0 ? "ok" : "empty",
             resultCount: result.results.length,
+            attemptCount: result.attempts.length,
+            okCount: result.attempts.filter((attempt) => attempt.outcome === "ok").length,
+            emptyCount: result.attempts.filter((attempt) => attempt.outcome === "empty").length,
+            errorCount: result.attempts.filter((attempt) => attempt.outcome === "error").length,
             selectedKeys: result.results.slice(0, 3).map((entry) => entry.tableKey),
             notes: [
               dataset.reason,
@@ -3826,25 +4176,38 @@ export class KosisService {
                 ? "표 후보를 확보했습니다."
                 : "결과가 비어 다음 후보로 내려갑니다.",
             ],
+            failureReasons,
           });
           return;
         }
 
         if (dataset.lane === "indicator-search") {
-          const result = await this.searchIndicators(
-            dataset.seedQuestion,
-            dataset.searchHints,
-            Math.max(limit, 4),
-          );
+          const result = await this.executeIndicatorSearch({
+            question: dataset.seedQuestion,
+            intent,
+            keywords: datasetKeywords,
+            queryPlan: dataset.queries,
+            limit: Math.max(limit, 4),
+          });
           indicatorSearchRuns.push(result);
+          const failureReasons = uniqueStrings(
+            result.attempts
+              .filter((attempt) => attempt.outcome === "error")
+              .flatMap((attempt) => attempt.notes),
+          );
           plannerExecutions.push({
             datasetId: dataset.datasetId,
             lane: dataset.lane,
             requirement: dataset.requirement,
             label: dataset.label,
             seedQuestion: dataset.seedQuestion,
+            queryPlan: dataset.queries,
             status: result.results.length > 0 ? "ok" : "empty",
             resultCount: result.results.length,
+            attemptCount: result.attempts.length,
+            okCount: result.attempts.filter((attempt) => attempt.outcome === "ok").length,
+            emptyCount: result.attempts.filter((attempt) => attempt.outcome === "empty").length,
+            errorCount: result.attempts.filter((attempt) => attempt.outcome === "error").length,
             selectedKeys: result.results.slice(0, 3).map((entry) => entry.indicatorKey),
             notes: [
               dataset.reason,
@@ -3852,24 +4215,37 @@ export class KosisService {
                 ? "지표 후보를 확보했습니다."
                 : "지표 결과가 비어 다음 후보로 내려갑니다.",
             ],
+            failureReasons,
           });
           return;
         }
 
-        const result = await this.browseCatalog(
-          dataset.seedQuestion,
-          dataset.searchHints,
-          Math.max(limit, 6),
-        );
+        const result = await this.executeCatalogBrowse({
+          question: dataset.seedQuestion,
+          intent,
+          keywords: datasetKeywords,
+          queryPlan: dataset.queries,
+          limit: Math.max(limit, 6),
+        });
         catalogSearchRuns.push(result);
+        const failureReasons = uniqueStrings(
+          result.attempts
+            .filter((attempt) => attempt.outcome === "error")
+            .flatMap((attempt) => attempt.notes),
+        );
         plannerExecutions.push({
           datasetId: dataset.datasetId,
           lane: dataset.lane,
           requirement: dataset.requirement,
           label: dataset.label,
           seedQuestion: dataset.seedQuestion,
+          queryPlan: dataset.queries,
           status: result.results.length > 0 ? "ok" : "empty",
           resultCount: result.results.length,
+          attemptCount: result.attempts.length,
+          okCount: result.attempts.filter((attempt) => attempt.outcome === "ok").length,
+          emptyCount: result.attempts.filter((attempt) => attempt.outcome === "empty").length,
+          errorCount: result.attempts.filter((attempt) => attempt.outcome === "error").length,
           selectedKeys: result.results.slice(0, 3).map((entry) => entry.catalogKey),
           notes: [
             dataset.reason,
@@ -3877,6 +4253,7 @@ export class KosisService {
               ? "카탈로그 후보를 확보했습니다."
               : "카탈로그 결과가 비어 다음 후보로 내려갑니다.",
           ],
+          failureReasons,
         });
       } catch (error) {
         const classification = classifyKosisError(error);
@@ -3886,10 +4263,16 @@ export class KosisService {
           requirement: dataset.requirement,
           label: dataset.label,
           seedQuestion: dataset.seedQuestion,
+          queryPlan: dataset.queries,
           status: "error",
           resultCount: 0,
+          attemptCount: 0,
+          okCount: 0,
+          emptyCount: 0,
+          errorCount: 1,
           selectedKeys: [],
           notes: [dataset.reason, classification.note],
+          failureReasons: [classification.note],
         });
         if (!classification.shouldFallback) {
           throw error;
@@ -4021,7 +4404,17 @@ export class KosisService {
         ? null
         : buildComparisonResult(
             bundles.map((entry) => entry.bundle),
-            { focus: intent.keywords.join(", ") },
+            {
+              focus:
+                planner.comparisonAxes.find((axis) => axis.axis === "indicator")?.values.join(" vs ") ||
+                planner.indicatorCandidates.slice(0, 2).map((candidate) => candidate.label).join(" vs ") ||
+                intent.keywords.join(", "),
+              timeRange: planner.period.label,
+              regions:
+                planner.comparisonAxes
+                  .find((axis) => axis.axis === "region")
+                  ?.values.filter((value) => value !== "지역별") ?? [],
+            },
           );
 
     const selectedTables = bundles
