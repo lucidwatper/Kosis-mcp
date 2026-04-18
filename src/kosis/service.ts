@@ -97,6 +97,29 @@ interface CachedLoadResult<T> {
   staleError?: unknown;
 }
 
+interface AnswerSearchRuns {
+  plannerExecutions: PlannerExecutionLog[];
+  search: SearchTopicsResult;
+  indicatorSearch: SearchIndicatorsResult;
+  catalogSearch: BrowseCatalogResult;
+  shouldSearchIndicators: boolean;
+  shouldBrowse: boolean;
+}
+
+interface AnswerTableEntry {
+  result: NormalizedSearchResult;
+  bundle: KosisTableBundle;
+  finalScore: number;
+  autoSelections?: PreviewRequestOptions;
+}
+
+interface AnswerIndicatorEntry {
+  result: NormalizedIndicatorResult;
+  bundle: IndicatorBundle;
+  finalScore: number;
+  display: AnswerBundle["selectedIndicators"][number];
+}
+
 const BUNDLE_CACHE_VERSION = "v4";
 const INDICATOR_BUNDLE_CACHE_VERSION = "v2";
 const TABLE_ATTEMPT_LIMIT = 14;
@@ -2903,22 +2926,11 @@ export class KosisService {
     return buildComparisonResult(bundles, options);
   }
 
-  async answerBundle(
-    question: string,
-    options?: {
-      limit?: number;
-      comparisonMode?: "auto" | "none" | "pairwise";
-      searchHints?: string[];
-    },
-  ): Promise<AnswerBundle> {
-    const limit = options?.limit ?? this.defaultLimit;
-    const intent = inferQuestionIntent(question);
-    const combinedHints = uniqueStrings([
-      ...(options?.searchHints ?? []),
-      ...intent.searchHints,
-      ...compareSearchHints(intent),
-    ]);
-    const planner = this.planQuestion(question, combinedHints);
+  private async runAnswerPlan(
+    planner: QuestionPlan,
+    intent: QueryIntent,
+    limit: number,
+  ): Promise<AnswerSearchRuns> {
     const plannerExecutions: PlannerExecutionLog[] = [];
     const tableSearchRuns: SearchTopicsResult[] = [];
     const indicatorSearchRuns: SearchIndicatorsResult[] = [];
@@ -3113,42 +3125,38 @@ export class KosisService {
       await executeDataset(dataset);
     }
 
-    const search =
-      tableSearchRuns.length > 0
-        ? mergeTopicSearchResults(tableSearchRuns)
-        : {
-            cacheStatus: "bypass" as const,
-            queryPlan: [],
-            attempts: [],
-            results: [],
-          };
-    const indicatorSearch =
-      indicatorSearchRuns.length > 0
-        ? mergeIndicatorSearchResults(indicatorSearchRuns)
-        : {
-            cacheStatus: "bypass" as const,
-            queryPlan: [],
-            attempts: [],
-            results: [],
-          };
-    const catalogSearch =
-      catalogSearchRuns.length > 0
-        ? mergeCatalogResults(catalogSearchRuns)
-        : {
-            cacheStatus: "bypass" as const,
-            queryPlan: [],
-            exploredViews: [],
-            attempts: [],
-            results: [],
-          };
+    return {
+      plannerExecutions,
+      search:
+        tableSearchRuns.length > 0
+          ? mergeTopicSearchResults(tableSearchRuns)
+          : { cacheStatus: "bypass", queryPlan: [], attempts: [], results: [] },
+      indicatorSearch:
+        indicatorSearchRuns.length > 0
+          ? mergeIndicatorSearchResults(indicatorSearchRuns)
+          : { cacheStatus: "bypass", queryPlan: [], attempts: [], results: [] },
+      catalogSearch:
+        catalogSearchRuns.length > 0
+          ? mergeCatalogResults(catalogSearchRuns)
+          : { cacheStatus: "bypass", queryPlan: [], exploredViews: [], attempts: [], results: [] },
+      shouldSearchIndicators: planner.datasets.some((dataset) => dataset.lane === "indicator-search"),
+      shouldBrowse: planner.datasets.some((dataset) => dataset.lane === "catalog-browse"),
+    };
+  }
 
-    const shouldSearchIndicators = planner.datasets.some(
-      (dataset) => dataset.lane === "indicator-search",
-    );
-    const shouldBrowse = planner.datasets.some(
-      (dataset) => dataset.lane === "catalog-browse",
-    );
-    const comparisonMode = options?.comparisonMode ?? "auto";
+  private async selectTableEntriesForAnswer(
+    intent: QueryIntent,
+    search: SearchTopicsResult,
+    catalogSearch: BrowseCatalogResult,
+    limit: number,
+    comparisonMode: "auto" | "none" | "pairwise",
+  ): Promise<{
+    selectionCounts: ReturnType<typeof preferredSelectionCounts>;
+    tableEntries: AnswerTableEntry[];
+    bundles: AnswerTableEntry[];
+    comparison: ComparisonResult | null;
+    selectedTables: AnswerBundle["selectedTables"];
+  }> {
     const selectionCounts = preferredSelectionCounts(intent, comparisonMode);
     const searchPool = new Map<string, NormalizedSearchResult>();
     for (const result of search.results) {
@@ -3164,6 +3172,7 @@ export class KosisService {
         searchPool.set(mapped.tableKey, mapped);
       }
     }
+
     const inspectedResultLimit =
       intent.primaryIntent === "compare"
         ? Math.min(Math.max(limit * 4, 12), searchPool.size)
@@ -3195,8 +3204,6 @@ export class KosisService {
           return {
             result,
             bundle: baseBundle,
-            bonus,
-            selectionBonus: 0,
             finalScore: result.score + bonus,
             autoSelections,
           };
@@ -3215,8 +3222,6 @@ export class KosisService {
         return {
           result,
           bundle: selectedBundle,
-          bonus,
-          selectionBonus,
           finalScore:
             result.score + bonus + selectionBonus + reliabilityBonus + policyBonus,
           autoSelections,
@@ -3225,25 +3230,15 @@ export class KosisService {
     ).then((entries) =>
       entries.sort((left, right) => right.finalScore - left.finalScore),
     );
+
     const pickedCount = Math.min(selectionCounts.tables, tableEntries.length);
     const bundles = selectTableEntries(tableEntries, intent, pickedCount);
-
     const comparison =
       comparisonMode === "none" || bundles.length <= 1
         ? null
         : buildComparisonResult(
             bundles.map((entry) => entry.bundle),
-            {
-              focus:
-                planner.comparisonAxes.find((axis) => axis.axis === "indicator")?.values.join(" vs ") ||
-                planner.indicatorCandidates.slice(0, 2).map((candidate) => candidate.label).join(" vs ") ||
-                intent.keywords.join(", "),
-              timeRange: planner.period.label,
-              regions:
-                planner.comparisonAxes
-                  .find((axis) => axis.axis === "region")
-                  ?.values.filter((value) => value !== "지역별") ?? [],
-            },
+            { focus: intent.keywords.join(", ") },
           );
 
     const selectedTables = bundles
@@ -3258,6 +3253,15 @@ export class KosisService {
       }))
       .sort((left, right) => right.score - left.score);
 
+    return { selectionCounts, tableEntries, bundles, comparison, selectedTables };
+  }
+
+  private async selectIndicatorsForAnswer(
+    question: string,
+    intent: QueryIntent,
+    indicatorSearch: SearchIndicatorsResult,
+    selectionCounts: ReturnType<typeof preferredSelectionCounts>,
+  ): Promise<AnswerIndicatorEntry[]> {
     const inspectedIndicatorLimit = Math.min(
       Math.max(
         selectionCounts.indicators,
@@ -3266,7 +3270,7 @@ export class KosisService {
       indicatorSearch.results.length,
     );
     const inspectedIndicators = indicatorSearch.results.slice(0, inspectedIndicatorLimit);
-    const selectedIndicatorEntries = await Promise.all(
+    return Promise.all(
       inspectedIndicators.map(async (result) => {
         const bundle = await this.getIndicatorBundle({
           indicatorId: result.indicatorId,
@@ -3299,10 +3303,13 @@ export class KosisService {
     ).then((entries) =>
       entries.sort((left, right) => right.finalScore - left.finalScore),
     );
-    const selectedIndicators = selectedIndicatorEntries
-      .slice(0, selectionCounts.indicators)
-      .map((entry) => entry.display);
+  }
 
+  private selectCatalogsForAnswer(
+    intent: QueryIntent,
+    catalogSearch: BrowseCatalogResult,
+    selectionCounts: ReturnType<typeof preferredSelectionCounts>,
+  ): AnswerBundle["selectedCatalogs"] {
     const rankedCatalogResults = [
       ...catalogSearch.results.filter((result) => !result.tblId && result.depth === 0),
       ...catalogSearch.results.filter((result) => result.depth >= 2),
@@ -3327,7 +3334,7 @@ export class KosisService {
           ]
         : rankedCatalogResults;
 
-    const selectedCatalogs = catalogSelectionSeed
+    return catalogSelectionSeed
       .filter((result, index, entries) =>
         entries.findIndex((entry) => entry.catalogKey === result.catalogKey) === index,
       )
@@ -3345,6 +3352,51 @@ export class KosisService {
         whyMatched: result.whyMatched,
         depth: result.depth,
       }));
+  }
+
+  async answerBundle(
+    question: string,
+    options?: {
+      limit?: number;
+      comparisonMode?: "auto" | "none" | "pairwise";
+      searchHints?: string[];
+    },
+  ): Promise<AnswerBundle> {
+    const limit = options?.limit ?? this.defaultLimit;
+    const intent = inferQuestionIntent(question);
+    const combinedHints = uniqueStrings([
+      ...(options?.searchHints ?? []),
+      ...intent.searchHints,
+      ...compareSearchHints(intent),
+    ]);
+    const planner = this.planQuestion(question, combinedHints);
+    const {
+      plannerExecutions,
+      search,
+      indicatorSearch,
+      catalogSearch,
+      shouldSearchIndicators,
+      shouldBrowse,
+    } = await this.runAnswerPlan(planner, intent, limit);
+    const comparisonMode = options?.comparisonMode ?? "auto";
+    const { selectionCounts, bundles, comparison, selectedTables } =
+      await this.selectTableEntriesForAnswer(
+        intent,
+        search,
+        catalogSearch,
+        limit,
+        comparisonMode,
+      );
+    const selectedIndicatorEntries = await this.selectIndicatorsForAnswer(
+      question,
+      intent,
+      indicatorSearch,
+      selectionCounts,
+    );
+    const selectedIndicators = selectedIndicatorEntries
+      .slice(0, selectionCounts.indicators)
+      .map((entry) => entry.display);
+    const selectedCatalogs = this.selectCatalogsForAnswer(intent, catalogSearch, selectionCounts);
 
     const nextQuestions = buildNextQuestionsByIntent({
       intent,
