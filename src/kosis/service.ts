@@ -3,6 +3,7 @@ import { KosisClient } from "./client.js";
 import { KosisApiError } from "./errors.js";
 import { fetchHtmlPreviewFallback } from "./html-fallback.js";
 import { inferQuestionIntent } from "./intent.js";
+import { buildQuestionPlan } from "./planner.js";
 import {
   buildQueryPlan,
   normalizeIndicatorRecord,
@@ -27,11 +28,14 @@ import type {
   KosisTableBundle,
   NormalizedIndicatorResult,
   NormalizedSearchResult,
+  PlannerExecutionLog,
+  PlannedDatasetCandidate,
   ProviderAttemptLog,
   PreviewDimensionGuide,
   PreviewGuide,
   PreviewAttemptLog,
   PreviewRequestOptions,
+  QuestionPlan,
   QueryPlanItem,
   QueryIntent,
   SearchIndicatorsResult,
@@ -2250,6 +2254,124 @@ function buildComparisonResult(
   };
 }
 
+function mergeCacheStatus(statuses: CacheStatus[]): CacheStatus {
+  return (
+    statuses.find((status) => status === "expired-revalidate-failed-stale-used") ??
+    statuses.find((status) => status === "fresh-hit") ??
+    statuses.find((status) => status === "expired-revalidate-success") ??
+    statuses.find((status) => status === "miss") ??
+    "bypass"
+  );
+}
+
+function mergeQueryPlanItems(groups: QueryPlanItem[][]): QueryPlanItem[] {
+  const merged = new Map<string, QueryPlanItem>();
+
+  for (const group of groups) {
+    for (const item of group) {
+      const key = `${item.query}::${item.reason}`;
+      if (!merged.has(key)) {
+        merged.set(key, item);
+      }
+    }
+  }
+
+  return [...merged.values()];
+}
+
+function mergeTopicSearchResults(searches: SearchTopicsResult[]): SearchTopicsResult {
+  const aggregate = new Map<string, NormalizedSearchResult>();
+
+  for (const search of searches) {
+    for (const result of search.results) {
+      const current = aggregate.get(result.tableKey);
+      if (!current || current.score < result.score) {
+        aggregate.set(result.tableKey, { ...result });
+        continue;
+      }
+
+      current.score += 2;
+      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
+      current.raw = { ...current.raw, ...result.raw };
+    }
+  }
+
+  return {
+    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
+    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
+    attempts: searches.flatMap((search) => search.attempts),
+    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
+  };
+}
+
+function mergeIndicatorSearchResults(
+  searches: SearchIndicatorsResult[],
+): SearchIndicatorsResult {
+  const aggregate = new Map<string, NormalizedIndicatorResult>();
+
+  for (const search of searches) {
+    for (const result of search.results) {
+      const current = aggregate.get(result.indicatorKey);
+      if (!current || current.score < result.score) {
+        aggregate.set(result.indicatorKey, { ...result });
+        continue;
+      }
+
+      current.score += 2;
+      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
+      current.matchedQueries = uniqueStrings([
+        ...current.matchedQueries,
+        ...result.matchedQueries,
+      ]);
+      current.matchedStrategies = uniqueStrings([
+        ...current.matchedStrategies,
+        ...result.matchedStrategies,
+      ]);
+      current.raw = { ...current.raw, ...result.raw };
+    }
+  }
+
+  return {
+    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
+    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
+    attempts: searches.flatMap((search) => search.attempts),
+    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
+  };
+}
+
+function mergeCatalogResults(searches: BrowseCatalogResult[]): BrowseCatalogResult {
+  const aggregate = new Map<string, CatalogResult>();
+
+  for (const search of searches) {
+    for (const result of search.results) {
+      const current = aggregate.get(result.catalogKey);
+      if (!current || current.score < result.score) {
+        aggregate.set(result.catalogKey, { ...result });
+        continue;
+      }
+
+      current.score += 2;
+      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
+      current.raw = { ...current.raw, ...result.raw };
+    }
+  }
+
+  return {
+    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
+    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
+    exploredViews: uniqueStrings(
+      searches.flatMap((search) =>
+        search.exploredViews.map((view) => `${view.vwCd}::${view.name}::${view.parentListId}`),
+      ),
+    ).map((entry) => {
+      const [vwCd, name, parentListId] = entry.split("::");
+      return { vwCd, name, parentListId };
+    }),
+    attempts: searches.flatMap((search) => search.attempts),
+    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
+  };
+}
+
 export class KosisService {
   constructor(
     private readonly client: KosisClient,
@@ -2462,6 +2584,13 @@ export class KosisService {
       previewAttempts,
       warning: `preview 조회 실패: ${lastFailureNote} (itmId=${input.previewPlan.itemId}, prdSe=${input.previewPlan.prdSe})`,
     };
+  }
+
+  planQuestion(
+    question: string,
+    searchHints: string[] = [],
+  ): QuestionPlan {
+    return buildQuestionPlan(question, searchHints);
   }
 
   async searchTopics(
@@ -3667,53 +3796,151 @@ export class KosisService {
       ...intent.searchHints,
       ...compareSearchHints(intent),
     ]);
-    const tableStructuredQuestion =
-      intent.comparison ||
-      intent.comparisonAxes.length > 0 ||
-      intent.operationTerms.some((term) => ["격차", "차이"].includes(term));
-    const shouldSearchIndicators = intent.wantsIndicators || (!tableStructuredQuestion && intent.wantsExplanation);
-    const shouldBrowse = wantsCatalogBrowse(question, intent);
-    const compareQueries = compareTopicQueries(intent);
-    const [search, indicatorSearch, catalogSearch, compareSearches] = await Promise.all([
-      this.searchTopics(question, combinedHints, limit),
-      shouldSearchIndicators
-        ? this.searchIndicators(question, combinedHints, limit)
-        : Promise.resolve<SearchIndicatorsResult>({
-            cacheStatus: "bypass",
+    const planner = this.planQuestion(question, combinedHints);
+    const plannerExecutions: PlannerExecutionLog[] = [];
+    const tableSearchRuns: SearchTopicsResult[] = [];
+    const indicatorSearchRuns: SearchIndicatorsResult[] = [];
+    const catalogSearchRuns: BrowseCatalogResult[] = [];
+
+    const executeDataset = async (dataset: PlannedDatasetCandidate): Promise<void> => {
+      try {
+        if (dataset.lane === "table-search") {
+          const result = await this.searchTopics(
+            dataset.seedQuestion,
+            dataset.searchHints,
+            Math.max(limit, dataset.requirement === "required" ? 6 : 4),
+          );
+          tableSearchRuns.push(result);
+          plannerExecutions.push({
+            datasetId: dataset.datasetId,
+            lane: dataset.lane,
+            requirement: dataset.requirement,
+            label: dataset.label,
+            seedQuestion: dataset.seedQuestion,
+            status: result.results.length > 0 ? "ok" : "empty",
+            resultCount: result.results.length,
+            selectedKeys: result.results.slice(0, 3).map((entry) => entry.tableKey),
+            notes: [
+              dataset.reason,
+              result.results.length > 0
+                ? "표 후보를 확보했습니다."
+                : "결과가 비어 다음 후보로 내려갑니다.",
+            ],
+          });
+          return;
+        }
+
+        if (dataset.lane === "indicator-search") {
+          const result = await this.searchIndicators(
+            dataset.seedQuestion,
+            dataset.searchHints,
+            Math.max(limit, 4),
+          );
+          indicatorSearchRuns.push(result);
+          plannerExecutions.push({
+            datasetId: dataset.datasetId,
+            lane: dataset.lane,
+            requirement: dataset.requirement,
+            label: dataset.label,
+            seedQuestion: dataset.seedQuestion,
+            status: result.results.length > 0 ? "ok" : "empty",
+            resultCount: result.results.length,
+            selectedKeys: result.results.slice(0, 3).map((entry) => entry.indicatorKey),
+            notes: [
+              dataset.reason,
+              result.results.length > 0
+                ? "지표 후보를 확보했습니다."
+                : "지표 결과가 비어 다음 후보로 내려갑니다.",
+            ],
+          });
+          return;
+        }
+
+        const result = await this.browseCatalog(
+          dataset.seedQuestion,
+          dataset.searchHints,
+          Math.max(limit, 6),
+        );
+        catalogSearchRuns.push(result);
+        plannerExecutions.push({
+          datasetId: dataset.datasetId,
+          lane: dataset.lane,
+          requirement: dataset.requirement,
+          label: dataset.label,
+          seedQuestion: dataset.seedQuestion,
+          status: result.results.length > 0 ? "ok" : "empty",
+          resultCount: result.results.length,
+          selectedKeys: result.results.slice(0, 3).map((entry) => entry.catalogKey),
+          notes: [
+            dataset.reason,
+            result.results.length > 0
+              ? "카탈로그 후보를 확보했습니다."
+              : "카탈로그 결과가 비어 다음 후보로 내려갑니다.",
+          ],
+        });
+      } catch (error) {
+        const classification = classifyKosisError(error);
+        plannerExecutions.push({
+          datasetId: dataset.datasetId,
+          lane: dataset.lane,
+          requirement: dataset.requirement,
+          label: dataset.label,
+          seedQuestion: dataset.seedQuestion,
+          status: "error",
+          resultCount: 0,
+          selectedKeys: [],
+          notes: [dataset.reason, classification.note],
+        });
+        if (!classification.shouldFallback) {
+          throw error;
+        }
+      }
+    };
+
+    for (const dataset of planner.datasets) {
+      await executeDataset(dataset);
+    }
+
+    const search =
+      tableSearchRuns.length > 0
+        ? mergeTopicSearchResults(tableSearchRuns)
+        : {
+            cacheStatus: "bypass" as const,
             queryPlan: [],
             attempts: [],
             results: [],
-          }),
-      shouldBrowse
-        ? this.browseCatalog(question, combinedHints, Math.max(limit, 6))
-        : Promise.resolve<BrowseCatalogResult>({
-            cacheStatus: "bypass",
+          };
+    const indicatorSearch =
+      indicatorSearchRuns.length > 0
+        ? mergeIndicatorSearchResults(indicatorSearchRuns)
+        : {
+            cacheStatus: "bypass" as const,
+            queryPlan: [],
+            attempts: [],
+            results: [],
+          };
+    const catalogSearch =
+      catalogSearchRuns.length > 0
+        ? mergeCatalogResults(catalogSearchRuns)
+        : {
+            cacheStatus: "bypass" as const,
             queryPlan: [],
             exploredViews: [],
             attempts: [],
             results: [],
-          }),
-      compareQueries.length > 0
-        ? Promise.all(
-            compareQueries.map((query) =>
-              this.searchTopics(query, [], Math.max(limit, 6)),
-            ),
-          )
-        : Promise.resolve<SearchTopicsResult[]>([]),
-    ]);
+          };
+
+    const shouldSearchIndicators = planner.datasets.some(
+      (dataset) => dataset.lane === "indicator-search",
+    );
+    const shouldBrowse = planner.datasets.some(
+      (dataset) => dataset.lane === "catalog-browse",
+    );
     const comparisonMode = options?.comparisonMode ?? "auto";
     const selectionCounts = preferredSelectionCounts(intent, comparisonMode);
     const searchPool = new Map<string, NormalizedSearchResult>();
     for (const result of search.results) {
       searchPool.set(result.tableKey, result);
-    }
-    for (const compareSearch of compareSearches) {
-      for (const result of compareSearch.results) {
-        const current = searchPool.get(result.tableKey);
-        if (!current || current.score < result.score) {
-          searchPool.set(result.tableKey, result);
-        }
-      }
     }
     for (const catalogResult of catalogSearch.results) {
       const mapped = catalogToSearchResult(catalogResult);
@@ -3943,8 +4170,13 @@ export class KosisService {
       interpretedIntent: {
         question,
         keywords: intent.keywords,
-        queryPlan: search.queryPlan,
+        queryPlan: mergeQueryPlanItems(
+          planner.datasets
+            .filter((dataset) => dataset.requirement === "required")
+            .map((dataset) => dataset.queries),
+        ),
       },
+      planner,
       summary,
       selectedTables,
       selectedIndicators,
@@ -3953,10 +4185,11 @@ export class KosisService {
       nextQuestions,
       evidence,
       provenance: {
+        plannerExecutions,
         lanes: [
           {
             lane: "table-search",
-            enabled: true,
+            enabled: planner.datasets.some((dataset) => dataset.lane === "table-search"),
             queryPlan: search.queryPlan,
             resultCount: search.results.length,
             attemptCount: tableAttemptSummary.attemptCount,

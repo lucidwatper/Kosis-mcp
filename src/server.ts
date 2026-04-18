@@ -25,6 +25,60 @@ const queryPlanItemSchema = z.object({
   reason: z.string(),
 });
 
+const plannerIndicatorCandidateSchema = z.object({
+  label: z.string(),
+  source: z.enum(["measure", "compare-target", "focus-term", "domain-family"]),
+  priority: z.number().int(),
+  searchHints: z.array(z.string()),
+});
+
+const plannerComparisonAxisSchema = z.object({
+  axis: z.enum(["indicator", "sex", "age", "region", "time"]),
+  values: z.array(z.string()),
+  required: z.boolean(),
+  reason: z.string(),
+});
+
+const plannerDatasetSchema = z.object({
+  datasetId: z.string(),
+  lane: z.enum(["table-search", "indicator-search", "catalog-browse"]),
+  requirement: z.enum(["required", "optional"]),
+  label: z.string(),
+  seedQuestion: z.string(),
+  reason: z.string(),
+  searchHints: z.array(z.string()),
+  queries: z.array(queryPlanItemSchema),
+});
+
+const plannerSchema = z.object({
+  question: z.string(),
+  primaryIntent: z.enum(["search", "browse", "explain", "compare", "value", "trend"]),
+  goal: z.string(),
+  indicatorCandidates: z.array(plannerIndicatorCandidateSchema),
+  comparisonAxes: z.array(plannerComparisonAxisSchema),
+  period: z.object({
+    preferredPrdSe: z.enum(["Y", "M", "Q", "S", "W", "D"]).optional(),
+    startPrdDe: z.string().optional(),
+    endPrdDe: z.string().optional(),
+    recentPeriods: z.number().int().optional(),
+    label: z.string(),
+    requiresTimeSeries: z.boolean(),
+  }),
+  datasets: z.array(plannerDatasetSchema),
+});
+
+const plannerExecutionSchema = z.object({
+  datasetId: z.string(),
+  lane: z.enum(["table-search", "indicator-search", "catalog-browse"]),
+  requirement: z.enum(["required", "optional"]),
+  label: z.string(),
+  seedQuestion: z.string(),
+  status: z.enum(["ok", "empty", "error", "skipped"]),
+  resultCount: z.number().int(),
+  selectedKeys: z.array(z.string()),
+  notes: z.array(z.string()),
+});
+
 const cacheStatusSchema = z.enum([
   "fresh-hit",
   "expired-revalidate-success",
@@ -173,6 +227,7 @@ const answerBundleSchema = z.object({
     keywords: z.array(z.string()),
     queryPlan: z.array(queryPlanItemSchema),
   }),
+  planner: plannerSchema,
   summary: z.object({
     headline: z.string(),
     takeaway: z.string(),
@@ -279,6 +334,7 @@ const answerBundleSchema = z.object({
   nextQuestions: z.array(z.string()),
   evidence: z.array(z.string()),
   provenance: z.object({
+    plannerExecutions: z.array(plannerExecutionSchema),
     lanes: z.array(
       z.object({
         lane: z.enum(["table-search", "indicator-search", "catalog-browse"]),
@@ -327,6 +383,22 @@ function createServer(service: KosisService): McpServer {
     name: "kosis-question-mcp",
     version: "0.1.0",
   });
+
+  server.registerTool(
+    "kosis_plan_question",
+    {
+      title: "KOSIS Question Planner",
+      description:
+        "Turn a general question into a KOSIS execution plan with indicator candidates, comparison axes, period intent, and required/optional dataset fallbacks.",
+      inputSchema: {
+        question: z.string().min(2),
+        searchHints: z.array(z.string().min(1)).optional(),
+      },
+      outputSchema: plannerSchema,
+    },
+    async ({ question, searchHints }) =>
+      asToolResult(service.planQuestion(question, searchHints)),
+  );
 
   server.registerTool(
     "kosis_search_topics",

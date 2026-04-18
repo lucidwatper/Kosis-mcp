@@ -5,6 +5,7 @@ import { KosisApiError } from "../src/kosis/errors.js";
 import { filterRowsToSelectedClasses } from "../src/kosis/html-fallback.js";
 import { resolveDefaultPeriodCode, resolvePeriodList } from "../src/kosis/html-fallback-core.js";
 import { inferQuestionIntent } from "../src/kosis/intent.js";
+import { buildQuestionPlan } from "../src/kosis/planner.js";
 import { buildQueryPlan, scoreSearchRecord } from "../src/kosis/relevance.js";
 import { KosisService } from "../src/kosis/service.js";
 import type { JsonRecord } from "../src/kosis/types.js";
@@ -1160,6 +1161,213 @@ test("buildQueryPlan separates lane-specific hints", () => {
   assert.ok(tablePlan.queryPlan.some((item) => item.query === "실업률 통계표"));
   assert.ok(!tablePlan.queryPlan.some((item) => item.query === "실업률 설명자료"));
   assert.ok(indicatorPlan.queryPlan.some((item) => item.query === "실업률 설명자료"));
+});
+
+test("buildQuestionPlan extracts indicator candidates, axes, period, and dataset priorities", () => {
+  const plan = buildQuestionPlan("지난 10년간 출생과 사망 건수 비교표를 보여줘");
+
+  assert.equal(plan.primaryIntent, "compare");
+  assert.equal(plan.period.preferredPrdSe, "Y");
+  assert.equal(plan.period.recentPeriods, 10);
+  assert.ok(plan.indicatorCandidates.some((candidate) => candidate.label === "출생아 수"));
+  assert.ok(plan.indicatorCandidates.some((candidate) => candidate.label === "사망자 수"));
+  assert.ok(
+    plan.comparisonAxes.some(
+      (axis) =>
+        axis.axis === "indicator" &&
+        axis.values.includes("출생아 수") &&
+        axis.values.includes("사망자 수"),
+    ),
+  );
+  assert.ok(
+    plan.datasets.some(
+      (dataset) =>
+        dataset.lane === "table-search" &&
+        dataset.requirement === "required" &&
+        dataset.label === "출생아 수",
+    ),
+  );
+  assert.ok(
+    plan.datasets.some(
+      (dataset) =>
+        dataset.lane === "table-search" &&
+        dataset.requirement === "required" &&
+        dataset.label === "사망자 수",
+    ),
+  );
+});
+
+test("buildQuestionPlan keeps compound entities and generic counts separate", () => {
+  const plan = buildQuestionPlan("지난 10년 동안 국민 연금 지출 현황 정리해서 표로 보여줘");
+
+  assert.ok(plan.indicatorCandidates.some((candidate) => candidate.label === "국민연금"));
+  assert.ok(plan.indicatorCandidates.some((candidate) => candidate.label === "연금 지출"));
+  assert.ok(!plan.indicatorCandidates.some((candidate) => candidate.label === "국민"));
+  assert.ok(
+    plan.datasets.some(
+      (dataset) =>
+        dataset.lane === "table-search" &&
+        (dataset.label === "국민연금" || dataset.searchHints.includes("국민연금")),
+    ),
+  );
+});
+
+class CompoundEntityPlannerClient extends FakeClient {
+  override async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
+    if (
+      params.searchNm.includes("국민연금") ||
+      params.searchNm.includes("급여지급") ||
+      params.searchNm.includes("지급액")
+    ) {
+      return [
+        {
+          ORG_ID: "322",
+          ORG_NM: "국민연금공단",
+          TBL_ID: "DT_32202_A015",
+          TBL_NM: "급여종류별 급여지급 현황",
+          STAT_ID: "2006260",
+          STAT_NM: "국민연금통계",
+          MT_ATITLE: "복지 > 국민연금통계 > 급여현황",
+          STRT_PRD_DE: "2012",
+          END_PRD_DE: "2024",
+          REC_TBL_SE: "Y",
+        },
+      ];
+    }
+
+    return [];
+  }
+
+  override async getMeta(params: { type: string; tblId?: string }): Promise<JsonRecord[]> {
+    if (params.tblId !== "DT_32202_A015") {
+      return [];
+    }
+
+    switch (params.type) {
+      case "TBL":
+        return [{ TBL_NM: "급여종류별 급여지급 현황" }];
+      case "ORG":
+        return [{ ORG_NM: "국민연금공단" }];
+      case "PRD":
+        return [
+          { PRD_SE: "Y", PRD_DE: "2023" },
+          { PRD_SE: "Y", PRD_DE: "2024" },
+        ];
+      case "ITM":
+        return [
+          { OBJ_ID: "ITEM", OBJ_NM: "항목", ITM_ID: "H002", ITM_NM: "지급금액", UNIT_NM: "천원" },
+          { OBJ_ID: "REGION", OBJ_NM: "지역별", OBJ_ID_SN: "1", ITM_ID: "TOTAL", ITM_NM: "합계" },
+          { OBJ_ID: "BEN", OBJ_NM: "급여종류별", OBJ_ID_SN: "2", ITM_ID: "SUM", ITM_NM: "계" },
+        ];
+      case "CMMT":
+        return [{ CMMT_NM: "주석", CMMT_DC: "국민연금 급여지급 현황" }];
+      case "UNIT":
+        return [{ UNIT_NM: "천원" }];
+      case "SOURCE":
+        return [{ JOSA_NM: "국민연금통계", STAT_ID: "2006260" }];
+      case "NCD":
+        return [{ PRD_SE: "Y", PRD_DE: "2024", SEND_DE: "20250101" }];
+      case "WGT":
+        return [{ C1: "TOTAL", ITM_ID: "H002", WGT_CO: "1.0000000000" }];
+      default:
+        return [];
+    }
+  }
+
+  override async getExplanation(): Promise<JsonRecord[]> {
+    return [{ statsNm: "국민연금통계" }];
+  }
+
+  override async getStatisticsData(params: {
+    tblId: string;
+    itmId?: string;
+    objParams?: Record<string, string>;
+  }): Promise<JsonRecord[]> {
+    if (
+      params.tblId === "DT_32202_A015" &&
+      params.itmId === "H002" &&
+      params.objParams?.objL1 === "TOTAL" &&
+      params.objParams?.objL2 === "SUM"
+    ) {
+      return [
+        {
+          TBL_NM: "급여종류별 급여지급 현황",
+          C1_OBJ_NM: "지역별",
+          C1_NM: "합계",
+          C2_OBJ_NM: "급여종류별",
+          C2_NM: "계",
+          ITM_NM: "지급금액",
+          UNIT_NM: "천원",
+          PRD_DE: "2024",
+          DT: "43704824715",
+        },
+      ];
+    }
+
+    return [];
+  }
+}
+
+test("answerBundle uses compound entity candidates to find pension payout tables", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-compound-entity-planner",
+    new CompoundEntityPlannerClient(),
+  );
+
+  const answer = await service.answerBundle(
+    "지난 10년 동안 국민 연금 지출 현황 정리해서 표로 보여줘",
+    { comparisonMode: "none" },
+  );
+
+  assert.equal(answer.selectedTables[0]?.tblId, "DT_32202_A015");
+  assert.ok(answer.planner.indicatorCandidates.some((candidate) => candidate.label === "국민연금"));
+  assert.ok(
+    answer.provenance.plannerExecutions.some(
+      (execution) =>
+        execution.lane === "table-search" &&
+        execution.status === "ok" &&
+        execution.selectedKeys.includes("322:DT_32202_A015"),
+    ),
+  );
+});
+
+class PlannerExecutionClient extends FakeClient {
+  override async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
+    if (params.searchNm.includes("고용률") || params.searchNm === "고용") {
+      return [];
+    }
+    return super.searchStatistics(params);
+  }
+}
+
+test("answerBundle exposes planner datasets and execution logs", async () => {
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-planner-fallback",
+    new PlannerExecutionClient(),
+  );
+
+  const answer = await service.answerBundle("고용 상황이 궁금해", {
+    comparisonMode: "none",
+  });
+
+  assert.ok(answer.planner.datasets.length >= 2);
+  assert.ok(answer.planner.indicatorCandidates.some((candidate) => candidate.label === "취업자"));
+  assert.ok(
+    answer.provenance.plannerExecutions.some(
+      (execution) =>
+        execution.lane === "table-search" &&
+        execution.requirement === "required" &&
+        execution.status === "ok",
+    ),
+  );
+  assert.ok(
+    answer.provenance.plannerExecutions.some(
+      (execution) =>
+        execution.lane === "indicator-search" &&
+        execution.requirement === "optional",
+    ),
+  );
+  assert.ok(answer.selectedTables.length >= 1);
 });
 
 test("resolveDefaultPeriodCode honors preferred yearly period when available", () => {

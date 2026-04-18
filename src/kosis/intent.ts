@@ -72,6 +72,10 @@ const QUERY_NOISE_TERMS = [
   "무엇",
   "설명",
   "의미",
+  "정리",
+  "정리해서",
+  "표",
+  "표로",
 ];
 const EXPLICIT_INDICATOR_TERMS = ["지표", "지수", "설명", "의미"];
 const TIME_SERIES_TERMS = ["추이", "변화", "변화율", "증감", "증감률", "시계열", "최근"];
@@ -102,12 +106,12 @@ const MEASURE_RULES: MeasureRule[] = [
   },
   {
     canonical: "이용건수",
-    patterns: ["이용건수", "사용건수", "건수"],
+    patterns: ["이용건수", "사용건수"],
     searchHints: ["이용건수"],
   },
   {
     canonical: "이용금액",
-    patterns: ["이용금액", "사용금액", "금액"],
+    patterns: ["이용금액", "사용금액"],
     searchHints: ["이용금액"],
   },
   {
@@ -116,6 +120,41 @@ const MEASURE_RULES: MeasureRule[] = [
     searchHints: ["발급장수"],
   },
 ];
+
+const ENTITY_PHRASE_NOISE_TERMS = new Set([
+  ...QUERY_NOISE_TERMS,
+  "현황",
+]);
+const COMPOUND_HEAD_TERMS = [
+  "연금",
+  "보험",
+  "기금",
+  "급여",
+  "수당",
+  "가입",
+  "수급",
+];
+
+function extractEntityPhrases(question: string): string[] {
+  const tokens = orderedTokenizeQuestion(question).filter(
+    (token) => !ENTITY_PHRASE_NOISE_TERMS.has(token),
+  );
+  const phrases: string[] = [];
+
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const pair = [tokens[index], tokens[index + 1]];
+    if (pair.some((token) => token.length < 2)) {
+      continue;
+    }
+
+    if (COMPOUND_HEAD_TERMS.includes(pair[1])) {
+      phrases.push(pair.join(" "));
+      phrases.push(pair.join(""));
+    }
+  }
+
+  return uniqueStrings(phrases).filter((phrase) => phrase.length >= 4);
+}
 
 function resolvePeriodIntent(
   question: string,
@@ -223,6 +262,7 @@ function extractFocusTerms(
   measures: string[],
 ): string[] {
   const focusTerms = uniqueStrings([
+    ...extractEntityPhrases(question),
     ...measures,
     ...keywords,
   ]).filter((term) => {
@@ -316,6 +356,7 @@ function extractIntentTargets(
   measures: string[],
 ): IntentTarget[] {
   const orderedTokens = orderedTokenizeQuestion(question);
+  const entityPhrases = extractEntityPhrases(question);
   const rawSegments = question
     .replace(/비교표|비교해줘|비교|대비/g, " ")
     .split(/(?:\s+대비\s+|\s*와\s+|\s*과\s+|\s+및\s+|\s+그리고\s+|,\s*|\/| vs\.? |·)/i)
@@ -358,11 +399,18 @@ function extractIntentTargets(
         segmentKeywords.some((keyword) => keyword.includes(term.toLowerCase())),
       );
       const existingText = segmentKeywords.join(" ");
-      const suffix = measureCandidates.find(
-        (candidate) =>
-          !existingText.includes(candidate) &&
-          !segmentKeywords.some((keyword) => candidate.includes(keyword)),
+      const alreadyHasMeasureLikeToken = segmentKeywords.some((keyword) =>
+        GENERIC_MEASURE_SUFFIXES.some(
+          (suffix) => keyword === suffix || keyword.endsWith(suffix),
+        ),
       );
+      const suffix = alreadyHasMeasureLikeToken
+        ? undefined
+        : measureCandidates.find(
+            (candidate) =>
+              GENERIC_MEASURE_SUFFIXES.includes(candidate) &&
+              !existingText.includes(candidate),
+          );
       const label = uniqueStrings([
         ...segmentKeywords,
         suffix,
@@ -475,7 +523,10 @@ export function inferQuestionIntent(
     operationTerms.some((term) => TIME_SERIES_TERMS.includes(term));
 
   const searchHints = uniqueStrings(
-    measureRules.flatMap((rule) => rule.searchHints),
+    [
+      ...measureRules.flatMap((rule) => rule.searchHints),
+      ...extractEntityPhrases(question),
+    ],
   );
 
   const geographyScope =

@@ -21,6 +21,69 @@ export interface QueryPlanItem {
   reason: string;
 }
 
+export type PlannerDatasetLane =
+  | "table-search"
+  | "indicator-search"
+  | "catalog-browse";
+
+export type PlannerDatasetRequirement = "required" | "optional";
+
+export interface PlannerIndicatorCandidate {
+  label: string;
+  source: "measure" | "compare-target" | "focus-term" | "domain-family";
+  priority: number;
+  searchHints: string[];
+}
+
+export interface PlannerComparisonAxis {
+  axis: "indicator" | "sex" | "age" | "region" | "time";
+  values: string[];
+  required: boolean;
+  reason: string;
+}
+
+export interface PlannerPeriodPlan {
+  preferredPrdSe?: "Y" | "M" | "Q" | "S" | "W" | "D";
+  startPrdDe?: string;
+  endPrdDe?: string;
+  recentPeriods?: number;
+  label: string;
+  requiresTimeSeries: boolean;
+}
+
+export interface PlannedDatasetCandidate {
+  datasetId: string;
+  lane: PlannerDatasetLane;
+  requirement: PlannerDatasetRequirement;
+  label: string;
+  seedQuestion: string;
+  reason: string;
+  searchHints: string[];
+  queries: QueryPlanItem[];
+}
+
+export interface QuestionPlan {
+  question: string;
+  primaryIntent: QueryIntent["primaryIntent"];
+  goal: string;
+  indicatorCandidates: PlannerIndicatorCandidate[];
+  comparisonAxes: PlannerComparisonAxis[];
+  period: PlannerPeriodPlan;
+  datasets: PlannedDatasetCandidate[];
+}
+
+export interface PlannerExecutionLog {
+  datasetId: string;
+  lane: PlannerDatasetLane;
+  requirement: PlannerDatasetRequirement;
+  label: string;
+  seedQuestion: string;
+  status: "ok" | "empty" | "error" | "skipped";
+  resultCount: number;
+  selectedKeys: string[];
+  notes: string[];
+}
+
 export interface NormalizedSearchResult {
   tableKey: string;
   orgId: string;
@@ -325,6 +388,7 @@ export interface BrowseCatalogResult {
 }
 
 export interface AnswerProvenance {
+  plannerExecutions: PlannerExecutionLog[];
   lanes: Array<{
     lane: "table-search" | "indicator-search" | "catalog-browse";
     enabled: boolean;
@@ -371,6 +435,7 @@ export interface AnswerBundle {
     keywords: string[];
     queryPlan: QueryPlanItem[];
   };
+  planner: QuestionPlan;
   summary: AnswerSummary;
   selectedTables: Array<
     KosisTableBundle["table"] & {
