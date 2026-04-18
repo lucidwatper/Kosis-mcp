@@ -101,7 +101,7 @@ interface CachedLoadResult<T> {
   staleError?: unknown;
 }
 
-const BUNDLE_CACHE_VERSION = "v3";
+const BUNDLE_CACHE_VERSION = "v4";
 const INDICATOR_BUNDLE_CACHE_VERSION = "v2";
 const DEFAULT_CATALOG_VIEWS: CatalogView[] = [
   { vwCd: "MT_ZTITLE", name: "주제별 통계", parentListId: "A" },
@@ -130,6 +130,9 @@ function mapPeriodCode(raw?: string): string {
   }
 
   const value = raw.trim().toUpperCase();
+  if (value === "H") {
+    return "S";
+  }
   if (["Y", "M", "Q", "S", "W", "D"].includes(value)) {
     return value;
   }
@@ -2605,7 +2608,7 @@ export class KosisService {
         outcome: fallbackRows.length > 0 ? "ok" : "empty",
         rowCount: fallbackRows.length,
         itemId: input.previewPlan.itemId,
-        prdSe: fallbackPreview?.periodCode ?? input.previewPlan.prdSe,
+        prdSe: mapPeriodCode(fallbackPreview?.periodCode ?? input.previewPlan.prdSe),
         attemptIndex: input.previewPlan.attempts.length,
         notes: [
           fallbackRows.length > 0
@@ -2617,7 +2620,7 @@ export class KosisService {
         return {
           dataPreview: fallbackRows,
           previewSource: "html-fallback",
-          effectivePreviewPrdSe: fallbackPreview.periodCode,
+          effectivePreviewPrdSe: mapPeriodCode(fallbackPreview.periodCode),
           previewAttempts,
         };
       }
