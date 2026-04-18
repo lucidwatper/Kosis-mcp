@@ -3,7 +3,25 @@ import { KosisClient } from "./client.js";
 import { KosisApiError } from "./errors.js";
 import { fetchHtmlPreviewFallback } from "./html-fallback.js";
 import { inferQuestionIntent } from "./intent.js";
+import {
+  availablePeriodCodes,
+  mapPeriodCode,
+  resolvePreferredPeriodCode,
+} from "./period.js";
 import { buildQuestionPlan } from "./planner.js";
+import {
+  buildCoveragePeriods,
+  buildTableIdentity,
+  buildValueComparisonMatrix,
+  derivePreviewPlanWithSelections,
+  detectReadiness,
+  estimateCellCount,
+  inferPreviewOptions,
+  normalizeDimensions,
+  normalizeUnits,
+  PreviewPlan,
+  toWeightMetaParams,
+} from "./preview-support.js";
 import {
   buildQueryPlan,
   normalizeIndicatorRecord,
@@ -11,6 +29,30 @@ import {
   scoreIndicatorRecord,
   scoreSearchRecord,
 } from "./relevance.js";
+import {
+  appendBudgetStopNote,
+  buildCatalogSearchAttempts,
+  buildIndicatorAttempts,
+  buildIndicatorCoverage,
+  buildIndicatorIdentity,
+  buildTableSearchAttempts,
+  catalogKeyFromRecord,
+  CatalogSearchAttempt,
+  chooseBestIndicatorRecord,
+  classifyKosisError,
+  DEFAULT_CATALOG_VIEWS,
+  firstUsableRecord,
+  IndicatorSearchAttempt,
+  intersectStrings,
+  mergeCatalogResults,
+  mergeIndicatorSearchResults,
+  mergeQueryPlanItems,
+  mergeTopicSearchResults,
+  shouldUseStaleBecauseOutputIsNotUsable,
+  summaryRow,
+  summarizeIndicatorAttempts,
+  TableSearchAttempt,
+} from "./search-support.js";
 import type {
   AnswerProvenance,
   AnswerBundle,
@@ -31,8 +73,6 @@ import type {
   PlannerExecutionLog,
   PlannedDatasetCandidate,
   ProviderAttemptLog,
-  PreviewDimensionGuide,
-  PreviewGuide,
   PreviewAttemptLog,
   PreviewRequestOptions,
   QuestionPlan,
@@ -41,10 +81,8 @@ import type {
   SearchIndicatorsResult,
   SearchAttemptLog,
   SearchTopicsResult,
-  TableIdentity,
 } from "./types.js";
 import {
-  guessDefaultDimensionValue,
   overlapCount,
   readString,
   tableKey,
@@ -52,48 +90,6 @@ import {
   tokenizeQuestion,
   uniqueStrings,
 } from "./utils.js";
-
-interface PreviewPlan {
-  itemId: string;
-  prdSe: string;
-  attempts: Array<Record<string, string>>;
-  guide: PreviewGuide;
-}
-
-interface IndicatorSearchAttempt {
-  query: string;
-  strategy:
-    | "list-exact"
-    | "explain-exact"
-    | "detail-exact"
-    | "list-sanitized"
-    | "explain-sanitized"
-    | "detail-sanitized"
-    | "id-explain"
-    | "id-detail";
-}
-
-interface TableSearchAttempt {
-  query: string;
-  strategy:
-    | "exact-plan"
-    | "sanitized-query"
-    | "measure-focused"
-    | "domain-focused"
-    | "suffix-boost";
-}
-
-interface CatalogSearchAttempt {
-  query: string;
-  strategy:
-    | "primary-depth1"
-    | "primary-depth2"
-    | "alternate-depth1"
-    | "alternate-depth2"
-    | "keyword-focused";
-  depthLimit: number;
-  views: CatalogView[];
-}
 
 interface CachedLoadResult<T> {
   value: T;
@@ -103,14 +99,6 @@ interface CachedLoadResult<T> {
 
 const BUNDLE_CACHE_VERSION = "v4";
 const INDICATOR_BUNDLE_CACHE_VERSION = "v2";
-const DEFAULT_CATALOG_VIEWS: CatalogView[] = [
-  { vwCd: "MT_ZTITLE", name: "주제별 통계", parentListId: "A" },
-  { vwCd: "MT_OTITLE", name: "기관별 통계", parentListId: "A" },
-  { vwCd: "MT_ATITLE01", name: "지역통계(주제별)", parentListId: "A" },
-  { vwCd: "MT_ATITLE02", name: "지역통계(기관별)", parentListId: "A" },
-  { vwCd: "MT_GTITLE01", name: "e-지방지표", parentListId: "A" },
-  { vwCd: "MT_ETITLE", name: "영문 KOSIS", parentListId: "A" },
-];
 const TABLE_ATTEMPT_LIMIT = 14;
 const TABLE_RESULT_TARGET = 6;
 const TABLE_SEARCH_BUDGET_MS = 8_000;
@@ -123,669 +111,6 @@ const INDICATOR_DISCOVERED_ID_LIMIT = 4;
 const INDICATOR_ATTEMPT_LIMIT = 36;
 const INDICATOR_RESULT_TARGET = 4;
 const INDICATOR_SEARCH_BUDGET_MS = 18_000;
-
-function mapPeriodCode(raw?: string): string {
-  if (!raw) {
-    return "Y";
-  }
-
-  const value = raw.trim().toUpperCase();
-  if (value === "H") {
-    return "S";
-  }
-  if (["Y", "M", "Q", "S", "W", "D"].includes(value)) {
-    return value;
-  }
-
-  const mapped: Record<string, string> = {
-    "년": "Y",
-    "연": "Y",
-    "월": "M",
-    "분기": "Q",
-    "반기": "S",
-    "주": "W",
-    "일": "D",
-  };
-
-  return mapped[raw.trim()] ?? "Y";
-}
-
-function derivePreviewPlan(meta: KosisMetaBundle, preferredPrdSe?: string): PreviewPlan {
-  return derivePreviewPlanWithSelections(meta, preferredPrdSe, undefined);
-}
-
-function availablePeriodCodes(meta: KosisMetaBundle): string[] {
-  return uniqueStrings(meta.period.map((row) => readString(row, "PRD_SE")));
-}
-
-function resolvePreferredPeriodCode(
-  meta: KosisMetaBundle,
-  preferredPrdSe?: string,
-): string | undefined {
-  const available = availablePeriodCodes(meta).map((value) => value?.toUpperCase());
-  if (available.length === 0) {
-    return preferredPrdSe;
-  }
-
-  const mappedPreferred = mapPeriodCode(preferredPrdSe);
-  if (available.includes(mappedPreferred)) {
-    return mappedPreferred;
-  }
-
-  if (available.includes("Y")) {
-    return "Y";
-  }
-
-  return available[0];
-}
-
-function buildPreviewGuide(meta: KosisMetaBundle): PreviewGuide {
-  const itemOptions = uniqueStrings(
-    meta.items
-      .filter((row) => readString(row, "OBJ_ID") === "ITEM")
-      .flatMap((row) => {
-        const id = readString(row, "ITM_ID");
-        const name = readString(row, "ITM_NM");
-        return id && name ? [`${id}::${name}`] : [];
-      }),
-  ).map((entry) => {
-    const [id, name] = entry.split("::");
-    return { id, name };
-  });
-
-  const dimensionGroups = new Map<
-    string,
-    PreviewDimensionGuide
-  >();
-
-  for (const row of meta.items) {
-    const objId = readString(row, "OBJ_ID");
-    if (!objId || objId === "ITEM") {
-      continue;
-    }
-
-    const order = Number.parseInt(readString(row, "OBJ_ID_SN") ?? "999", 10);
-    const itmId = readString(row, "ITM_ID");
-    const itmNm = readString(row, "ITM_NM");
-    if (!itmId) {
-      continue;
-    }
-
-    const current = dimensionGroups.get(objId) ?? {
-      objId,
-      name: readString(row, "OBJ_NM") ?? objId,
-      order: Number.isFinite(order) ? order : 999,
-      values: [],
-    };
-    if (itmNm) {
-      current.values.push({ id: itmId, name: itmNm });
-    }
-    current.order = Number.isFinite(order) ? order : current.order;
-    dimensionGroups.set(objId, current);
-  }
-
-  return {
-    itemOptions,
-    dimensions: [...dimensionGroups.values()]
-      .map((dimension) => ({
-        ...dimension,
-        values: uniqueStrings(
-          dimension.values.map((value) => `${value.id}::${value.name}`),
-        )
-          .map((entry) => {
-            const [id, name] = entry.split("::");
-            return { id, name };
-          })
-          .slice(0, 50),
-      }))
-      .sort((left, right) => left.order - right.order),
-  };
-}
-
-function resolveSelectionValue(
-  dimension: PreviewDimensionGuide,
-  selection: string | string[] | undefined,
-): string | undefined {
-  if (!selection) {
-    return undefined;
-  }
-
-  const candidates = Array.isArray(selection) ? selection : [selection];
-  const lowered = candidates.map((value) => value.toLowerCase().trim());
-
-  const matched = dimension.values.find((value) => {
-    const id = value.id.toLowerCase();
-    const name = value.name.toLowerCase();
-    return lowered.some((candidate) => candidate === id || candidate === name);
-  });
-
-  return matched?.id;
-}
-
-function toWeightMetaParams(
-  attempts: Array<Record<string, string>>,
-  itemId: string,
-): Record<string, string> | undefined {
-  const primaryAttempt = attempts[0];
-  if (!primaryAttempt) {
-    return undefined;
-  }
-
-  const weightParams: Record<string, string> = {};
-  for (const [key, value] of Object.entries(primaryAttempt)) {
-    const match = key.match(/^objL(\d+)$/);
-    if (!match || value === "all") {
-      continue;
-    }
-    weightParams[`C${match[1]}`] = value;
-  }
-
-  if (itemId && itemId !== "all") {
-    weightParams.ITEM = itemId;
-  }
-
-  return Object.keys(weightParams).length > 0 ? weightParams : undefined;
-}
-
-function derivePreviewPlanWithSelections(
-  meta: KosisMetaBundle,
-  preferredPrdSe?: string,
-  options?: PreviewRequestOptions,
-): PreviewPlan {
-  const guide = buildPreviewGuide(meta);
-  const itemSelectionLowered = options?.itemSelection?.toLowerCase().trim();
-  const itemId =
-    guide.itemOptions.find((option) => {
-      if (!itemSelectionLowered) {
-        return false;
-      }
-      return (
-        option.id.toLowerCase() === itemSelectionLowered ||
-        option.name.toLowerCase() === itemSelectionLowered
-      );
-    })?.id ??
-    guide.itemOptions[0]?.id ??
-    "all";
-
-  const explicitAttempt: Record<string, string> = {};
-  const allAttempt: Record<string, string> = {};
-  const firstValueAttempt: Record<string, string> = {};
-
-  for (const [index, dimension] of guide.dimensions.entries()) {
-    const selection =
-      options?.dimensionSelections?.[dimension.objId] ??
-      options?.dimensionSelections?.[dimension.name];
-    const selectedId =
-      resolveSelectionValue(dimension, selection) ??
-      guessDefaultDimensionValue(
-        dimension.name,
-        dimension.objId,
-        dimension.values,
-      );
-
-    explicitAttempt[`objL${index + 1}`] = selectedId ?? "all";
-    allAttempt[`objL${index + 1}`] = "all";
-    firstValueAttempt[`objL${index + 1}`] = dimension.values[0]?.id ?? "all";
-  }
-
-  return {
-    itemId,
-    prdSe: mapPeriodCode(preferredPrdSe),
-    attempts:
-      guide.dimensions.length > 0
-        ? [explicitAttempt, allAttempt, firstValueAttempt]
-        : [{ objL1: "all" }],
-    guide,
-  };
-}
-
-function normalizeUnits(meta: KosisMetaBundle, preview: DataPreviewRow[]): string[] {
-  const previewLabelUnits = preview.flatMap((row) =>
-    Object.values(row)
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.match(/\(([^()]+)\)/)?.[1]),
-  );
-
-  return uniqueStrings([
-    ...meta.units.map((row) => readString(row, "UNIT_NM") ?? readString(row, "UNIT_NM_ENG")),
-    ...meta.items.map((row) => readString(row, "UNIT_NM") ?? readString(row, "UNIT_ENG_NM")),
-    ...preview.map((row) => {
-      const value = row.UNIT_NM;
-      return typeof value === "string" ? value : undefined;
-    }),
-    ...previewLabelUnits,
-  ]);
-}
-
-function normalizeDimensions(meta: KosisMetaBundle, preview: DataPreviewRow[]): string[] {
-  const fromMeta = meta.items.map((row) => {
-    const objNm = readString(row, "OBJ_NM");
-    const objId = readString(row, "OBJ_ID");
-    return objNm ?? objId;
-  });
-
-  const fromPreview = preview.flatMap((row) =>
-    Object.entries(row)
-      .filter(([key, value]) => key.endsWith("_OBJ_NM") && typeof value === "string")
-      .map(([, value]) => value as string),
-  );
-
-  return uniqueStrings([...fromMeta, ...fromPreview]);
-}
-
-function normalizePeriods(meta: KosisMetaBundle, preview: DataPreviewRow[]): string[] {
-  return uniqueStrings([
-    ...meta.period.map((row) => readString(row, "PRD_DE")),
-    ...preview.map((row) => {
-      const value = row.PRD_DE;
-      return typeof value === "string" ? value : undefined;
-    }),
-    ...preview.flatMap((row) =>
-      Object.keys(row)
-        .filter((key) => key !== "tableKey")
-        .map((key) => normalizePreviewPeriodKey(key))
-        .filter(Boolean),
-    ),
-  ]);
-}
-
-function normalizePreviewPeriodKey(key: string): string | undefined {
-  const trimmed = key.trim().replace(/p\)$/i, "").trim();
-  const yearMatch = trimmed.match(/^(\d{4})$/);
-  if (yearMatch) {
-    return yearMatch[1];
-  }
-  const yearWordMatch = trimmed.match(/^(\d{4})년$/);
-  if (yearWordMatch) {
-    return yearWordMatch[1];
-  }
-  const compactMatch = trimmed.match(/^(\d{4})(\d{2})$/);
-  if (compactMatch) {
-    return `${compactMatch[1]}-${compactMatch[2]}`;
-  }
-  const dottedMonthMatch = trimmed.match(/^(\d{4})\.(\d{2})$/);
-  if (dottedMonthMatch) {
-    return `${dottedMonthMatch[1]}-${dottedMonthMatch[2]}`;
-  }
-  const quarterMatch = trimmed.match(/^(\d{4})\s*Q([1-4])$/i);
-  if (quarterMatch) {
-    return `${quarterMatch[1]}-Q${quarterMatch[2]}`;
-  }
-  return undefined;
-}
-
-function parseNumericValue(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const normalized = value.replace(/,/g, "").trim();
-  if (!normalized || normalized === "-" || normalized === "…" || normalized === "…") {
-    return undefined;
-  }
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function inferSeriesLabel(row: DataPreviewRow): string {
-  const preferredKeys = [
-    "ITM_NM",
-    "itmNm",
-    "1) 기본항목별",
-    "기본항목별",
-    "항목",
-  ];
-  for (const key of preferredKeys) {
-    const value = row[key];
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-
-  const fallback = Object.entries(row)
-    .filter(([key]) => key !== "tableKey")
-    .find(([, value]) => typeof value === "string" && !parseNumericValue(value));
-  if (fallback && typeof fallback[1] === "string") {
-    return fallback[1].trim();
-  }
-
-  return "값";
-}
-
-function inferSeriesUnit(label: string, bundle: KosisTableBundle): string | undefined {
-  const labelUnit = label.match(/\(([^()]+)\)/)?.[1]?.trim();
-  if (labelUnit) {
-    return labelUnit;
-  }
-  return bundle.units[0];
-}
-
-interface PreviewSeries {
-  label: string;
-  unit?: string;
-  values: Record<string, number>;
-}
-
-function extractPreviewSeries(bundle: KosisTableBundle): PreviewSeries[] {
-  const seriesMap = new Map<string, PreviewSeries>();
-
-  for (const row of bundle.dataPreview) {
-    const label = inferSeriesLabel(row);
-    const key = label || bundle.table.title;
-    const existing = seriesMap.get(key) ?? {
-      label: key,
-      unit: inferSeriesUnit(key, bundle),
-      values: {},
-    };
-
-    const directPeriod = normalizePreviewPeriodKey(String(row.PRD_DE ?? ""));
-    const directValue = parseNumericValue(row.DT);
-    if (directPeriod && directValue !== undefined) {
-      existing.values[directPeriod] = directValue;
-    }
-
-    for (const [column, value] of Object.entries(row)) {
-      if (column === "tableKey" || column === "PRD_DE" || column === "DT") {
-        continue;
-      }
-      const period = normalizePreviewPeriodKey(column);
-      const numeric = parseNumericValue(value);
-      if (!period || numeric === undefined) {
-        continue;
-      }
-      existing.values[period] = numeric;
-    }
-
-    if (Object.keys(existing.values).length > 0) {
-      seriesMap.set(key, existing);
-    }
-  }
-
-  return [...seriesMap.values()];
-}
-
-function buildValueComparisonMatrix(
-  bundles: KosisTableBundle[],
-): JsonRecord[] {
-  const columns = bundles.flatMap((bundle) =>
-    extractPreviewSeries(bundle).map((series) => ({
-      key: `${bundle.table.tableKey}:${series.label}`,
-      title: bundle.table.title,
-      label: series.label,
-      unit: series.unit,
-      values: series.values,
-    })),
-  );
-  const periods = uniqueStrings(
-    columns.flatMap((column) => Object.keys(column.values)),
-  ).sort();
-
-  return periods.map((period) => {
-    const row: JsonRecord = { period };
-    for (const column of columns) {
-      row[`${column.title} | ${column.label}`] = column.values[period];
-    }
-    return row;
-  });
-}
-
-function buildTableIdentity(
-  orgId: string,
-  tblId: string,
-  meta: KosisMetaBundle,
-  explanation: JsonRecord | null,
-): TableIdentity {
-  const sourceRecord = meta.source[0] ?? {};
-  const updatedAtRecord = meta.updatedAt[0] ?? {};
-  const title = readString(meta.table[0] ?? {}, "TBL_NM") ?? tblId;
-  const organization =
-    readString(meta.organization[0] ?? {}, "ORG_NM") ?? readString(sourceRecord, "DEPT_NM");
-  const statId = readString(sourceRecord, "STAT_ID");
-  const survey =
-    readString(sourceRecord, "JOSA_NM") ?? readString(explanation ?? {}, "statsNm");
-  const lastPeriod = readString(updatedAtRecord, "PRD_DE") ?? readString(meta.period.at(-1) ?? {}, "PRD_DE");
-
-  return {
-    tableKey: tableKey(orgId, tblId),
-    orgId,
-    tblId,
-    statId,
-    title,
-    organization,
-    survey,
-    period: lastPeriod,
-  };
-}
-
-function estimateCellCount(
-  meta: KosisMetaBundle,
-  requestedPeriods: number,
-  dimensionWidth = 2,
-): number {
-  const dimensionCount = Math.max(
-    1,
-    uniqueStrings(meta.items.map((row) => readString(row, "OBJ_ID"))).length,
-  );
-  const itemCount = Math.max(
-    1,
-    uniqueStrings(meta.items.map((row) => readString(row, "ITM_ID"))).length,
-  );
-
-  return requestedPeriods * itemCount * Math.max(1, dimensionCount * dimensionWidth);
-}
-
-function detectReadiness(preview: DataPreviewRow[], warnings: string[]): "high" | "medium" | "low" {
-  if (preview.length > 0) {
-    return "high";
-  }
-  if (warnings.length === 0) {
-    return "medium";
-  }
-  return "low";
-}
-
-function summaryRow(bundle: KosisTableBundle) {
-  return {
-    tableKey: bundle.table.tableKey,
-    title: bundle.table.title,
-    organization: bundle.table.organization,
-    units: bundle.units,
-    periods: bundle.coverage.periods,
-    dimensionCount: bundle.dimensions.length,
-    previewRows: bundle.dataPreview.length,
-    readiness: bundle.comparisonReadiness,
-    warnings: bundle.warnings,
-  };
-}
-
-function intersectStrings(groups: string[][]): string[] {
-  if (groups.length === 0) {
-    return [];
-  }
-
-  return groups
-    .reduce((accumulator, current) =>
-      accumulator.filter((value) => current.includes(value)),
-    )
-    .filter(Boolean);
-}
-
-function chooseItemSelection(
-  guide: PreviewGuide,
-  keywords: string[],
-  title: string,
-): string | undefined {
-  const loweredTitle = title.toLowerCase();
-  const options = guide.itemOptions;
-  if (options.length === 0) {
-    return undefined;
-  }
-
-  const byName = (patterns: string[]) =>
-    options.find((option) =>
-      patterns.some((pattern) => option.name.includes(pattern)),
-    )?.name;
-
-  if (loweredTitle.includes("실업")) {
-    return byName(["실업률", "실업자"]);
-  }
-  if (loweredTitle.includes("고용") || loweredTitle.includes("취업")) {
-    return byName(["고용률", "취업자", "취업률"]);
-  }
-  if (keywords.includes("실업")) {
-    return byName(["실업률", "실업자"]);
-  }
-  if (keywords.includes("고용") || keywords.includes("취업")) {
-    return byName(["고용률", "취업자", "취업률"]);
-  }
-
-  return options[0]?.name;
-}
-
-function chooseDimensionSelections(
-  guide: PreviewGuide,
-  keywords: string[],
-): Record<string, string> {
-  const selections: Record<string, string> = {};
-
-  for (const dimension of guide.dimensions) {
-    if (
-      (dimension.name.includes("연령") || dimension.objId.toLowerCase().includes("age")) &&
-      keywords.includes("청년")
-    ) {
-      const match =
-        dimension.values.find((value) => value.name.includes("15 - 29세")) ??
-        dimension.values.find((value) => value.name.includes("20 - 29세")) ??
-        dimension.values.find((value) => value.name.includes("청년"));
-      if (match) {
-        selections[dimension.name] = match.name;
-        continue;
-      }
-    }
-
-    if (dimension.name.includes("성별")) {
-      const match =
-        (keywords.includes("남성") || keywords.includes("남자"))
-          ? dimension.values.find((value) => value.name.includes("남"))
-          : (keywords.includes("여성") || keywords.includes("여자"))
-            ? dimension.values.find((value) => value.name.includes("여"))
-            : dimension.values.find(
-                (value) => value.name.includes("전체") || value.name === "계",
-              );
-      if (match) {
-        selections[dimension.name] = match.name;
-        continue;
-      }
-    }
-
-    if (
-      (dimension.name.includes("국가") || dimension.name.includes("지역")) &&
-      !Object.keys(selections).includes(dimension.name)
-    ) {
-      const match = dimension.values.find(
-        (value) =>
-          value.name.includes("전국") ||
-          value.name.includes("대한민국") ||
-          value.name.includes("전체") ||
-          value.name === "계",
-      );
-      if (match) {
-        selections[dimension.name] = match.name;
-      }
-    }
-  }
-
-  return selections;
-}
-
-function inferPreviewOptions(
-  bundle: KosisTableBundle,
-  intent: QueryIntent,
-): PreviewRequestOptions | undefined {
-  const measurePatterns = intent.measures.length > 0 ? intent.measures : intent.keywords;
-  const dimensionSelections = chooseDimensionSelections(
-    bundle.previewGuide,
-    intent.keywords,
-  );
-
-  if (intent.geographyScope === "national") {
-    for (const dimension of bundle.previewGuide.dimensions) {
-      if (dimension.name.includes("지역") || dimension.name.includes("국가")) {
-        const match = dimension.values.find((value) =>
-          ["전국", "대한민국", "한국", "계", "합계"].some((candidate) =>
-            value.name.includes(candidate),
-          ),
-        );
-        if (match) {
-          dimensionSelections[dimension.name] = match.name;
-        }
-      }
-    }
-  }
-
-  if (intent.sexSelection) {
-    for (const dimension of bundle.previewGuide.dimensions) {
-      if (dimension.name.includes("성별")) {
-        const match = dimension.values.find((value) => value.name.includes(intent.sexSelection!));
-        if (match) {
-          dimensionSelections[dimension.name] = match.name;
-        }
-      }
-    }
-  }
-
-  if (intent.ageSelection) {
-    for (const dimension of bundle.previewGuide.dimensions) {
-      if (dimension.name.includes("연령")) {
-        const match = dimension.values.find((value) =>
-          value.name.includes(intent.ageSelection!),
-        );
-        if (match) {
-          dimensionSelections[dimension.name] = match.name;
-        }
-      }
-    }
-  }
-
-  let itemSelection = chooseItemSelection(
-    bundle.previewGuide,
-    intent.keywords,
-    bundle.table.title,
-  );
-
-  for (const dimension of bundle.previewGuide.dimensions) {
-    const measureMatch = dimension.values.find((value) =>
-      measurePatterns.some((measure) => value.name.includes(measure)),
-    );
-    if (measureMatch) {
-      dimensionSelections[dimension.name] = measureMatch.name;
-    }
-  }
-
-  const optionMatch = bundle.previewGuide.itemOptions.find((option) =>
-    measurePatterns.some((measure) => option.name.includes(measure)),
-  );
-  if (optionMatch) {
-    itemSelection = optionMatch.name;
-  }
-
-  if (!itemSelection && Object.keys(dimensionSelections).length === 0) {
-    return undefined;
-  }
-
-  return {
-    itemSelection,
-    dimensionSelections:
-      Object.keys(dimensionSelections).length > 0 ? dimensionSelections : undefined,
-    newEstPrdCnt: intent.recentPeriods ? Math.min(intent.recentPeriods, 24) : 3,
-    startPrdDe: intent.startPrdDe,
-    endPrdDe: intent.endPrdDe,
-  };
-}
 
 function computeQuestionBonus(
   bundle: KosisTableBundle,
@@ -995,342 +320,6 @@ function computeBundleReliabilityBonus(bundle: KosisTableBundle): number {
   }
 
   return bonus;
-}
-
-function isNoDataError(error: unknown): boolean {
-  return (
-    error instanceof KosisApiError &&
-    (error.code === "30" || error.message.includes("데이터가 존재하지 않습니다"))
-  );
-}
-
-function classifyKosisError(error: unknown): {
-  errorType?: "404" | "no-data" | "other";
-  errorClass: SearchAttemptLog["errorClass"];
-  shouldFallback: boolean;
-  note: string;
-} {
-  if (!(error instanceof KosisApiError)) {
-    return {
-      errorType: "other",
-      errorClass: "unknown",
-      shouldFallback: false,
-      note: "비KOSIS 오류라서 즉시 중단 대상입니다.",
-    };
-  }
-
-  if (error.code === "10" || error.code === "11") {
-    return {
-      errorType: "other",
-      errorClass: "fatal-auth",
-      shouldFallback: false,
-      note: "인증 오류라서 다른 후보로 내려가지 않습니다.",
-    };
-  }
-
-  if (
-    error.code === "20" ||
-    error.code === "21" ||
-    error.code === "22" ||
-    error.message.includes("필수요청변수값이 누락") ||
-    error.message.includes("필수요청변수") ||
-    error.message.includes("잘못된 요청변수") ||
-    error.message.includes("허용되지 않은 파라미터")
-  ) {
-    return {
-      errorType: "other",
-      errorClass: "fatal-request",
-      shouldFallback: true,
-      note: "요청 파라미터 조합이 맞지 않아 다음 전략으로 축소합니다.",
-    };
-  }
-
-  if (error.code === "30" || error.message.includes("데이터가 존재하지 않습니다")) {
-    return {
-      errorType: "no-data",
-      errorClass: "recoverable-empty",
-      shouldFallback: true,
-      note: "조회 결과 없음이라 다음 후보로 내려갑니다.",
-    };
-  }
-
-  if (error.code === "31" || error.code === "41") {
-    return {
-      errorType: "other",
-      errorClass: "recoverable-shape",
-      shouldFallback: true,
-      note: "결과 범위가 커서 더 좁은 후보가 필요합니다.",
-    };
-  }
-
-  if (error.code === "40" || error.code === "42") {
-    return {
-      errorType: "other",
-      errorClass: "recoverable-quota",
-      shouldFallback: true,
-      note: "호출 제한이 걸려 더 싼 후보나 캐시로 내려갑니다.",
-    };
-  }
-
-  if (
-    error.code === "50" ||
-    error.message.includes("status 404") ||
-    error.message.includes("사이트 변경안내") ||
-    error.message.includes("non-JSON payload")
-  ) {
-    return {
-      errorType: error.message.includes("status 404") ? "404" : "other",
-      errorClass: "recoverable-server",
-      shouldFallback: true,
-      note: "서버/응답 형태 문제라 fallback 대상입니다.",
-    };
-  }
-
-  return {
-    errorType: "other",
-    errorClass: "unknown",
-    shouldFallback: false,
-    note: "분류되지 않은 오류라 바로 surface 합니다.",
-  };
-}
-
-function isIndicatorRecoverableError(error: unknown): boolean {
-  return classifyKosisError(error).shouldFallback;
-}
-
-function classifySearchError(error: unknown): SearchAttemptLog["errorType"] {
-  return classifyKosisError(error).errorType;
-}
-
-function shouldUseStaleBecauseOutputIsNotUsable(
-  attempts: Array<ProviderAttemptLog>,
-  resultCount: number,
-): boolean {
-  if (resultCount > 0) {
-    return false;
-  }
-
-  const hadServerishError = attempts.some((attempt) =>
-    ["recoverable-server", "recoverable-quota", "recoverable-shape"].includes(
-      attempt.errorClass ?? "",
-    ),
-  );
-  const hadOkAttempt = attempts.some((attempt) => attempt.outcome === "ok");
-  return hadServerishError && !hadOkAttempt;
-}
-
-function appendBudgetStopNote<T extends ProviderAttemptLog>(
-  attempts: T[],
-  input: {
-    provider: string;
-    strategy: string;
-    note: string;
-    query?: string;
-    itemId?: string;
-    prdSe?: string;
-    attemptIndex?: number;
-    parentListId?: string;
-    depth?: number;
-  },
-): void {
-  const common = {
-    provider: input.provider,
-    strategy: input.strategy,
-    cacheStatus: "bypass" as const,
-    outcome: "empty" as const,
-    rowCount: 0,
-    notes: [input.note],
-  };
-
-  attempts.push({
-    ...common,
-    ...(input.query ? { query: input.query } : {}),
-    ...(input.itemId ? { itemId: input.itemId } : {}),
-    ...(input.prdSe ? { prdSe: input.prdSe } : {}),
-    ...(typeof input.attemptIndex === "number" ? { attemptIndex: input.attemptIndex } : {}),
-    ...(input.parentListId ? { parentListId: input.parentListId } : {}),
-    ...(typeof input.depth === "number" ? { depth: input.depth } : {}),
-  } as T);
-}
-
-function sanitizeSearchQuery(query: string): string {
-  return query
-    .replace(/대한민국|한국|국내|지난|최근|비교해줘|비교|보여줘|설명해줘|무엇인지|의미|설명자료/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function buildTableSearchAttempts(
-  question: string,
-  intent: QueryIntent,
-  queryPlan: QueryPlanItem[],
-): TableSearchAttempt[] {
-  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query)).slice(0, 6);
-  const sanitizedQueries = uniqueStrings(exactQueries.map(sanitizeSearchQuery)).filter(
-    (query) => query.length >= 2,
-  ).slice(0, 4);
-  const measureQueries = uniqueStrings([
-    ...intent.measures,
-    ...intent.keywords.slice(0, 2),
-  ]).filter((query) => query.length >= 2).slice(0, 3);
-  const domainQueries = uniqueStrings(intent.searchHints).filter((query) => query.length >= 2).slice(0, 3);
-  const suffixQueries = uniqueStrings(
-    [...intent.measures, ...intent.keywords.slice(0, 2)].flatMap((query) =>
-      query.length >= 2 ? [`${query} 통계표`, `${query} 통계자료`] : [],
-    ),
-  ).slice(0, 2);
-
-  return [
-    ...exactQueries.map((query) => ({ query, strategy: "exact-plan" as const })),
-    ...sanitizedQueries.map((query) => ({ query, strategy: "sanitized-query" as const })),
-    ...measureQueries.map((query) => ({ query, strategy: "measure-focused" as const })),
-    ...domainQueries.map((query) => ({ query, strategy: "domain-focused" as const })),
-    ...suffixQueries.map((query) => ({ query, strategy: "suffix-boost" as const })),
-  ];
-}
-
-function alternateCatalogViews(primaryViews: CatalogView[]): CatalogView[] {
-  const primaryCodes = new Set(primaryViews.map((view) => view.vwCd));
-  return DEFAULT_CATALOG_VIEWS.filter((view) => !primaryCodes.has(view.vwCd));
-}
-
-function buildCatalogSearchAttempts(
-  question: string,
-  intent: QueryIntent,
-  queryPlan: QueryPlanItem[],
-): CatalogSearchAttempt[] {
-  const primaryViews = selectCatalogViews(question, intent);
-  const alternateViews = alternateCatalogViews(primaryViews);
-  const exactQuery = queryPlan[0]?.query ?? question;
-  const sanitizedQuery = sanitizeSearchQuery(exactQuery) || exactQuery;
-  const keywordQuery = intent.keywords[0] ?? sanitizedQuery;
-
-  return [
-    { query: exactQuery, strategy: "primary-depth1", depthLimit: 1, views: primaryViews },
-    { query: exactQuery, strategy: "primary-depth2", depthLimit: 2, views: primaryViews },
-    { query: sanitizedQuery, strategy: "alternate-depth1", depthLimit: 1, views: alternateViews },
-    {
-      query: keywordQuery,
-      strategy: "keyword-focused",
-      depthLimit: intent.primaryIntent === "browse" ? 2 : 1,
-      views: primaryViews,
-    },
-  ];
-}
-
-function sanitizeIndicatorQuery(query: string): string {
-  return query
-    .replace(/대한민국|한국|국내/g, "")
-    .replace(/최근|추이|설명자료|설명|의미|수치|값|통계표|통계자료|지표|시계열/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function buildIndicatorAttempts(
-  question: string,
-  intent: QueryIntent,
-  queryPlan: QueryPlanItem[],
-): IndicatorSearchAttempt[] {
-  const exactQueries = uniqueStrings(queryPlan.map((item) => item.query)).slice(
-    0,
-    INDICATOR_EXACT_QUERY_LIMIT,
-  );
-  const sanitizedQueries = uniqueStrings([
-    ...exactQueries.map(sanitizeIndicatorQuery),
-    ...intent.measures,
-    ...intent.keywords.filter((keyword) => keyword.length >= 2),
-    sanitizeIndicatorQuery(question),
-  ]).filter((query) => query.length >= 2).slice(0, INDICATOR_SANITIZED_QUERY_LIMIT);
-
-  const attempts: IndicatorSearchAttempt[] = [];
-  for (const query of exactQueries) {
-    attempts.push({ query, strategy: "list-exact" });
-    attempts.push({ query, strategy: "explain-exact" });
-    attempts.push({ query, strategy: "detail-exact" });
-  }
-  for (const query of sanitizedQueries) {
-    attempts.push({ query, strategy: "list-sanitized" });
-    attempts.push({ query, strategy: "explain-sanitized" });
-    attempts.push({ query, strategy: "detail-sanitized" });
-  }
-
-  return attempts;
-}
-
-function chooseBestIndicatorRecord(
-  records: JsonRecord[],
-  nameHint?: string,
-): JsonRecord | null {
-  if (records.length === 0) {
-    return null;
-  }
-
-  const normalizedHint = nameHint?.replace(/\s+/g, "").toLowerCase();
-  const loweredHint = nameHint?.toLowerCase();
-  if (!normalizedHint || !loweredHint) {
-    return records[0];
-  }
-
-  const exact = records.find((record) => {
-    const name = (readString(record, "statJipyoNm") ?? "")
-      .replace(/\s+/g, "")
-      .toLowerCase();
-    return name === normalizedHint;
-  });
-  if (exact) {
-    return exact;
-  }
-
-  const partial = records.find((record) => {
-    const name = (readString(record, "statJipyoNm") ?? "").toLowerCase();
-    return name.includes(loweredHint);
-  });
-  return partial ?? records[0];
-}
-
-function buildIndicatorCoverage(
-  listMatches: JsonRecord[],
-  detailRows: JsonRecord[],
-): IndicatorBundle["coverage"] {
-  const firstList = listMatches[0] ?? {};
-  const firstDetail = detailRows[0] ?? {};
-  const lastDetail = detailRows.at(-1) ?? {};
-
-  return {
-    start:
-      readString(firstList, "strtPrdDe") ??
-      readString(firstDetail, "prdDe"),
-    end:
-      readString(firstList, "endPrdDe") ??
-      readString(lastDetail, "prdDe"),
-    latest:
-      readString(firstList, "prdDe") ??
-      readString(lastDetail, "prdDe"),
-    prdSe:
-      readString(firstDetail, "prdSe"),
-    prdSeName: readString(firstList, "prdSeName"),
-  };
-}
-
-function buildIndicatorIdentity(
-  indicatorId: string | undefined,
-  indicatorName: string,
-  listMatches: JsonRecord[],
-  detailRows: JsonRecord[],
-  sourceQuery?: string,
-): IndicatorBundle["indicator"] {
-  return {
-    indicatorId,
-    indicatorName,
-    unit:
-      readString(detailRows[0] ?? {}, "unit") ??
-      readString(listMatches[0] ?? {}, "unit"),
-    sourceQuery,
-  };
-}
-
-function firstUsableRecord(rows: JsonRecord[]): JsonRecord | null {
-  return rows.find((row) => Object.keys(row).length > 0) ?? null;
 }
 
 function computeIndicatorBonus(
@@ -2024,40 +1013,6 @@ function buildAnswerSummary(input: {
   };
 }
 
-function summarizeIndicatorAttempts(
-  attempts: IndicatorSearchAttemptLog[],
-): AnswerProvenance["lanes"][number] {
-  const okCount = attempts.filter((attempt) => attempt.outcome === "ok").length;
-  const emptyCount = attempts.filter((attempt) => attempt.outcome === "empty").length;
-  const errorAttempts = attempts.filter((attempt) => attempt.outcome === "error");
-  const strategyCounts = new Map<string, number>();
-
-  for (const attempt of attempts) {
-    strategyCounts.set(
-      attempt.strategy,
-      (strategyCounts.get(attempt.strategy) ?? 0) + 1,
-    );
-  }
-
-  const topStrategies = [...strategyCounts.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 5)
-    .map(([strategy]) => strategy);
-
-  return {
-    lane: "indicator-search",
-    enabled: true,
-    queryPlan: [],
-    resultCount: 0,
-    attemptCount: attempts.length,
-    okCount,
-    emptyCount,
-    errorCount: errorAttempts.length,
-    error404Count: errorAttempts.filter((attempt) => attempt.errorType === "404").length,
-    topStrategies,
-  };
-}
-
 function wantsCatalogBrowse(question: string, intent: QueryIntent): boolean {
   return (
     intent.primaryIntent === "browse" ||
@@ -2103,20 +1058,6 @@ function maxCatalogDepth(intent: QueryIntent): number {
     return 2;
   }
   return 1;
-}
-
-function catalogKeyFromRecord(view: CatalogView, record: JsonRecord): string | null {
-  const orgId = readString(record, "ORG_ID");
-  const tblId = readString(record, "TBL_ID");
-  const listId = readString(record, "LIST_ID");
-
-  if (orgId && tblId) {
-    return `catalog-table:${view.vwCd}:${orgId}:${tblId}`;
-  }
-  if (listId) {
-    return `catalog-list:${view.vwCd}:${listId}`;
-  }
-  return null;
 }
 
 function scoreCatalogRecord(
@@ -2315,124 +1256,6 @@ function buildComparisonResult(
         bundle.dataPreview.slice(0, 3).map((row) => textFromRecord(row)),
       ),
     ]),
-  };
-}
-
-function mergeCacheStatus(statuses: CacheStatus[]): CacheStatus {
-  return (
-    statuses.find((status) => status === "expired-revalidate-failed-stale-used") ??
-    statuses.find((status) => status === "fresh-hit") ??
-    statuses.find((status) => status === "expired-revalidate-success") ??
-    statuses.find((status) => status === "miss") ??
-    "bypass"
-  );
-}
-
-function mergeQueryPlanItems(groups: QueryPlanItem[][]): QueryPlanItem[] {
-  const merged = new Map<string, QueryPlanItem>();
-
-  for (const group of groups) {
-    for (const item of group) {
-      const key = `${item.query}::${item.reason}`;
-      if (!merged.has(key)) {
-        merged.set(key, item);
-      }
-    }
-  }
-
-  return [...merged.values()];
-}
-
-function mergeTopicSearchResults(searches: SearchTopicsResult[]): SearchTopicsResult {
-  const aggregate = new Map<string, NormalizedSearchResult>();
-
-  for (const search of searches) {
-    for (const result of search.results) {
-      const current = aggregate.get(result.tableKey);
-      if (!current || current.score < result.score) {
-        aggregate.set(result.tableKey, { ...result });
-        continue;
-      }
-
-      current.score += 2;
-      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
-      current.raw = { ...current.raw, ...result.raw };
-    }
-  }
-
-  return {
-    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
-    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
-    attempts: searches.flatMap((search) => search.attempts),
-    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
-  };
-}
-
-function mergeIndicatorSearchResults(
-  searches: SearchIndicatorsResult[],
-): SearchIndicatorsResult {
-  const aggregate = new Map<string, NormalizedIndicatorResult>();
-
-  for (const search of searches) {
-    for (const result of search.results) {
-      const current = aggregate.get(result.indicatorKey);
-      if (!current || current.score < result.score) {
-        aggregate.set(result.indicatorKey, { ...result });
-        continue;
-      }
-
-      current.score += 2;
-      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
-      current.matchedQueries = uniqueStrings([
-        ...current.matchedQueries,
-        ...result.matchedQueries,
-      ]);
-      current.matchedStrategies = uniqueStrings([
-        ...current.matchedStrategies,
-        ...result.matchedStrategies,
-      ]);
-      current.raw = { ...current.raw, ...result.raw };
-    }
-  }
-
-  return {
-    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
-    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
-    attempts: searches.flatMap((search) => search.attempts),
-    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
-  };
-}
-
-function mergeCatalogResults(searches: BrowseCatalogResult[]): BrowseCatalogResult {
-  const aggregate = new Map<string, CatalogResult>();
-
-  for (const search of searches) {
-    for (const result of search.results) {
-      const current = aggregate.get(result.catalogKey);
-      if (!current || current.score < result.score) {
-        aggregate.set(result.catalogKey, { ...result });
-        continue;
-      }
-
-      current.score += 2;
-      current.whyMatched = uniqueStrings([...current.whyMatched, ...result.whyMatched]);
-      current.raw = { ...current.raw, ...result.raw };
-    }
-  }
-
-  return {
-    cacheStatus: mergeCacheStatus(searches.map((search) => search.cacheStatus)),
-    queryPlan: mergeQueryPlanItems(searches.map((search) => search.queryPlan)),
-    exploredViews: uniqueStrings(
-      searches.flatMap((search) =>
-        search.exploredViews.map((view) => `${view.vwCd}::${view.name}::${view.parentListId}`),
-      ),
-    ).map((entry) => {
-      const [vwCd, name, parentListId] = entry.split("::");
-      return { vwCd, name, parentListId };
-    }),
-    attempts: searches.flatMap((search) => search.attempts),
-    results: [...aggregate.values()].sort((left, right) => right.score - left.score),
   };
 }
 
@@ -2801,6 +1624,8 @@ export class KosisService {
       input.question,
       input.intent,
       input.queryPlan,
+      INDICATOR_EXACT_QUERY_LIMIT,
+      INDICATOR_SANITIZED_QUERY_LIMIT,
     );
     const discoveredIds = new Set<string>();
     const indicatorSearchWindow = Math.max(input.limit * 6, 30);
@@ -3128,6 +1953,7 @@ export class KosisService {
       input.question,
       input.intent,
       input.queryPlan,
+      selectCatalogViews,
     );
     const aggregate = new Map<string, CatalogResult>();
     const attemptLogs: SearchAttemptLog[] = [];
@@ -3682,7 +2508,7 @@ export class KosisService {
           units: normalizeUnits(meta, dataPreview),
           dimensions: normalizeDimensions(meta, dataPreview),
           coverage: {
-            periods: normalizePeriods(meta, dataPreview),
+            periods: buildCoveragePeriods(meta, dataPreview),
             lastUpdated: readString(meta.updatedAt[0] ?? {}, "SEND_DE"),
           },
           previewGuide: previewPlan.guide,
