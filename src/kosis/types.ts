@@ -78,10 +78,16 @@ export interface PlannerExecutionLog {
   requirement: PlannerDatasetRequirement;
   label: string;
   seedQuestion: string;
+  queryPlan: QueryPlanItem[];
   status: "ok" | "empty" | "error" | "skipped";
   resultCount: number;
+  attemptCount: number;
+  okCount: number;
+  emptyCount: number;
+  errorCount: number;
   selectedKeys: string[];
   notes: string[];
+  failureReasons: string[];
 }
 
 export interface NormalizedSearchResult {

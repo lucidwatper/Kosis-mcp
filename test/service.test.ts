@@ -1370,6 +1370,48 @@ test("answerBundle exposes planner datasets and execution logs", async () => {
   assert.ok(answer.selectedTables.length >= 1);
 });
 
+class PlannedQueryOrderClient extends FakeClient {
+  readonly searchQueries: string[] = [];
+
+  override async searchStatistics(params: { searchNm: string }): Promise<JsonRecord[]> {
+    this.searchQueries.push(params.searchNm);
+    if (params.searchNm === "고용률") {
+      throw new KosisApiError("데이터가 존재하지 않습니다.", "30");
+    }
+    return super.searchStatistics(params);
+  }
+}
+
+test("answerBundle executes planner query order directly and keeps dataset failure reasons", async () => {
+  const client = new PlannedQueryOrderClient();
+  const service = await createService(
+    "/tmp/kosis-question-mcp-test-planner-query-order",
+    client,
+  );
+
+  const answer = await service.answerBundle("고용 상황이 궁금해", {
+    comparisonMode: "none",
+  });
+  const firstTableDataset = answer.planner.datasets.find(
+    (dataset) => dataset.lane === "table-search",
+  );
+  assert.ok(firstTableDataset);
+
+  assert.equal(client.searchQueries[0], firstTableDataset!.queries[0]?.query);
+  assert.ok(client.searchQueries.length >= 1);
+
+  const execution = answer.provenance.plannerExecutions.find(
+    (entry) => entry.datasetId === firstTableDataset!.datasetId,
+  );
+  assert.ok(execution);
+  assert.deepEqual(execution!.queryPlan, firstTableDataset!.queries);
+  assert.ok(execution!.attemptCount >= 1);
+  assert.ok(execution!.errorCount >= 1);
+  assert.ok(
+    execution!.failureReasons.some((reason) => reason.includes("조회 결과 없음이라 다음 후보로 내려갑니다.")),
+  );
+});
+
 test("resolveDefaultPeriodCode honors preferred yearly period when available", () => {
   const statInfo = {
     defaultPeriodStr: "M",

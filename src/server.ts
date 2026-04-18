@@ -73,10 +73,16 @@ const plannerExecutionSchema = z.object({
   requirement: z.enum(["required", "optional"]),
   label: z.string(),
   seedQuestion: z.string(),
+  queryPlan: z.array(queryPlanItemSchema),
   status: z.enum(["ok", "empty", "error", "skipped"]),
   resultCount: z.number().int(),
+  attemptCount: z.number().int(),
+  okCount: z.number().int(),
+  emptyCount: z.number().int(),
+  errorCount: z.number().int(),
   selectedKeys: z.array(z.string()),
   notes: z.array(z.string()),
+  failureReasons: z.array(z.string()),
 });
 
 const cacheStatusSchema = z.enum([
